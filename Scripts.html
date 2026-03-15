@@ -1,0 +1,2324 @@
+<script>
+let APP = {
+  user: null,
+  branding: { hotelName:'Hotel Name', tagline:'Hotel Tagline', logoDataUri:'' },
+  dashboard: { totalRooms:0, occupied:0, reserved:0, dirty:0 },
+  rooms: [],
+  reservations: [],
+  bookingHistory: [],
+  housekeepingHistory: [],
+  maintenanceHistory: [],
+  cleaningHistory: [],
+  payments: [],
+  paymentHistory: [],
+  nonRoomAreas: [],
+  nonRoomHousekeepingHistory: [],
+  nonRoomCleaningHistory: [],
+  users: [],
+  roles: [],
+  channels: [],
+  activeTab: 'dashboard',
+  reportRange: { start:'', end:'' },
+  cleaningReportRange: { start:'', end:'' },
+  cleaningReportUser: ''
+};
+
+const APARTMENT_FIXED_RATE_CLIENT = 300000;
+
+document.addEventListener('DOMContentLoaded', function(){
+  boot();
+});
+
+function boot(){
+  renderLogin();
+
+  google.script.run
+    .withSuccessHandler(function(res){
+      if (res && res.ok && res.user) {
+        mergeAppData({
+          user: res.user || null,
+          branding: res.branding || APP.branding,
+          dashboard: res.dashboard || APP.dashboard,
+          rooms: res.rooms || [],
+          reservations: res.reservations || [],
+          bookingHistory: res.bookingHistory || [],
+          housekeepingHistory: res.housekeepingHistory || [],
+          maintenanceHistory: res.maintenanceHistory || [],
+          cleaningHistory: res.cleaningHistory || [],
+          payments: res.paymentHistory || [],
+          paymentHistory: res.paymentHistory || [],
+          nonRoomAreas: res.nonRoomAreas || [],
+          nonRoomHousekeepingHistory: res.nonRoomHousekeepingHistory || [],
+          nonRoomCleaningHistory: res.nonRoomCleaningHistory || [],
+          users: res.users || [],
+          roles: res.roles || [],
+          channels: res.channels || []
+        });
+
+        renderAppShell();
+        renderActiveTab();
+      } else {
+        renderLogin();
+      }
+    })
+    .withFailureHandler(function(){
+      renderLogin();
+    })
+    .getAppBootstrap();
+}
+
+function renderLogin(){
+  const app = document.getElementById('app');
+  if (!app) return;
+
+  app.innerHTML = `
+    <div class="login-wrap">
+      <div class="login-card">
+        <div class="brand-head">
+          ${brandLogoHtml()}
+          <div class="brand-copy">
+            <h2>${escapeHtml((APP.branding && APP.branding.hotelName) || 'NDDC Clubhouse')}</h2>
+            <p>${escapeHtml((APP.branding && APP.branding.tagline) || 'Redefining Luxury Living')}</p>
+          </div>
+        </div>
+
+        <div style="display:grid;gap:14px">
+          <div>
+            <label>Username</label>
+            <input id="loginUsername" placeholder="Enter username">
+          </div>
+          <div>
+            <label>Password / PIN</label>
+            <input id="loginPassword" type="password" placeholder="Enter password">
+          </div>
+          <button class="btn btn-primary" onclick="doLogin(this)">Login</button>
+        </div>
+      </div>
+    </div>
+    <div class="toast-stack" id="toastStack"></div>
+  `;
+}
+
+function doLogin(btn){
+  const username = (document.getElementById('loginUsername')?.value || '').trim();
+  const password = document.getElementById('loginPassword')?.value || '';
+
+  if (!username || !password) {
+    toast('Enter login details.', 'error');
+    return;
+  }
+
+  setBusy(btn, true);
+
+  google.script.run
+    .withSuccessHandler(function(res){
+      setBusy(btn, false);
+
+      if (!res || !res.ok) {
+        toast((res && res.message) || 'Login failed', 'error');
+        return;
+      }
+
+      APP.user = res.user || null;
+      loadApp();
+      toast(`Welcome ${res.user.fullName || res.user.username || ''}`, 'success');
+    })
+    .withFailureHandler(function(err){
+      setBusy(btn, false);
+      toast((err && err.message) || 'Login failed', 'error');
+    })
+    .login(username, password);
+}
+
+function mergeAppData(next){
+  if (!next) return;
+  APP = Object.assign({}, APP, next);
+  if (next.paymentHistory && !next.payments) APP.payments = next.paymentHistory;
+  if (next.payments && !next.paymentHistory) APP.paymentHistory = next.payments;
+}
+
+function loadApp(){
+  google.script.run
+    .withSuccessHandler(function(res){
+      if(!res || !res.ok){
+        renderLogin();
+        toast((res && res.message) || 'Failed to load app', 'error');
+        return;
+      }
+
+      mergeAppData({
+        user: res.user || null,
+        branding: res.branding || APP.branding,
+        dashboard: res.dashboard || APP.dashboard,
+        rooms: res.rooms || [],
+        reservations: res.reservations || [],
+        bookingHistory: res.bookingHistory || [],
+        housekeepingHistory: res.housekeepingHistory || [],
+        maintenanceHistory: res.maintenanceHistory || [],
+        cleaningHistory: res.cleaningHistory || [],
+        payments: res.paymentHistory || [],
+        paymentHistory: res.paymentHistory || [],
+        nonRoomAreas: res.nonRoomAreas || [],
+        nonRoomHousekeepingHistory: res.nonRoomHousekeepingHistory || [],
+        nonRoomCleaningHistory: res.nonRoomCleaningHistory || [],
+        users: res.users || [],
+        roles: res.roles || [],
+        channels: res.channels || []
+      });
+
+      renderAppShell();
+      renderActiveTab();
+    })
+    .withFailureHandler(function(){
+      renderLogin();
+      toast('Failed to load app', 'error');
+    })
+    .getAppBootstrap();
+}
+
+function renderAppShell(){
+  const app = document.getElementById('app');
+  if (!app) return;
+
+  const isHousekeeping = APP.user && APP.user.role === 'Housekeeping';
+  const tabs = isHousekeeping
+    ? ['dashboard','rooms','housekeeping','nonRoomHousekeeping','cleaningHistory','maintenance','admin']
+    : ['dashboard','rooms','reservations','housekeeping','nonRoomHousekeeping','cleaningHistory','bookingHistory','paymentHistory','reports','maintenance','admin'];
+
+  app.innerHTML = `
+    <div class="screen-wrap">
+      <div class="topbar">
+        <div class="topbar-left">
+          ${brandLogoHtml()}
+          <div>
+            <h1>${escapeHtml(APP.branding.hotelName || 'NDDC Clubhouse')}</h1>
+            <div class="subtle">${escapeHtml(APP.branding.tagline || '')}</div>
+          </div>
+        </div>
+        <div class="btn-row">
+          <button class="btn btn-dark" onclick="hardRefreshApp()">Refresh</button>
+          <button class="btn btn-outline" onclick="openMaintenanceModal()">New Maintenance Log</button>
+          ${isHousekeeping ? '' : `<button class="btn btn-primary" onclick="openReservationModal()">New Reservation</button>`}
+          <button class="btn btn-dark" onclick="logoutApp()">Logout</button>
+        </div>
+      </div>
+
+      <div class="nav-tabs">
+        ${tabs.map(function(tab){
+          return `<button class="tab ${APP.activeTab===tab?'active':''}" onclick="setTab('${escapeJs(tab)}')">${labelForTab(tab)}</button>`;
+        }).join('')}
+      </div>
+
+      <div id="dashboardSection" style="display:none"></div>
+      <div id="roomsSection" style="display:none"></div>
+      <div id="reservationsSection" style="display:none"></div>
+      <div id="housekeepingSection" style="display:none"></div>
+      <div id="nonRoomSection" style="display:none"></div>
+      <div id="cleaningHistorySection" style="display:none"></div>
+      <div id="bookingHistorySection" style="display:none"></div>
+      <div id="paymentHistorySection" style="display:none"></div>
+      <div id="reportSection" style="display:none"></div>
+      <div id="maintenanceSection" style="display:none"></div>
+      <div id="adminSection" style="display:none"></div>
+    </div>
+    <div class="toast-stack" id="toastStack"></div>
+  `;
+}
+
+function renderActiveTab(){
+  hideAllSections();
+  switch(APP.activeTab){
+    case 'dashboard':
+      document.getElementById('dashboardSection').style.display='block';
+      renderDashboard();
+      break;
+    case 'rooms':
+      document.getElementById('roomsSection').style.display='block';
+      renderRooms();
+      break;
+    case 'reservations':
+      document.getElementById('reservationsSection').style.display='block';
+      renderReservations();
+      break;
+    case 'housekeeping':
+      document.getElementById('housekeepingSection').style.display='block';
+      renderHousekeeping();
+      break;
+    case 'nonRoomHousekeeping':
+      document.getElementById('nonRoomSection').style.display='block';
+      renderNonRoomHousekeeping();
+      break;
+    case 'cleaningHistory':
+      document.getElementById('cleaningHistorySection').style.display='block';
+      renderCleaningHistory();
+      break;
+    case 'bookingHistory':
+      document.getElementById('bookingHistorySection').style.display='block';
+      renderBookingHistory();
+      break;
+    case 'paymentHistory':
+      document.getElementById('paymentHistorySection').style.display='block';
+      renderPaymentHistory();
+      break;
+    case 'reports':
+      document.getElementById('reportSection').style.display='block';
+      renderReports();
+      break;
+    case 'maintenance':
+      document.getElementById('maintenanceSection').style.display='block';
+      renderMaintenance();
+      break;
+    case 'admin':
+      document.getElementById('adminSection').style.display='block';
+      renderAdmin();
+      break;
+    default:
+      document.getElementById('dashboardSection').style.display='block';
+      renderDashboard();
+  }
+}
+
+function hideAllSections(){
+  [
+    'dashboardSection','roomsSection','reservationsSection','housekeepingSection',
+    'nonRoomSection','cleaningHistorySection','bookingHistorySection',
+    'paymentHistorySection','reportSection','maintenanceSection','adminSection'
+  ].forEach(function(id){
+    const el = document.getElementById(id);
+    if (el) el.style.display = 'none';
+  });
+}
+
+function setTab(tab){
+  APP.activeTab = tab;
+  renderAppShell();
+  renderActiveTab();
+}
+
+function brandLogoHtml(){
+  const src = (APP.branding && APP.branding.logoDataUri) || '';
+  if (!src) return '';
+  return `<img class="brand-logo" src="${src}" alt="Logo" onerror="this.style.display='none'">`;
+}
+
+function rerenderReservationsOnly(){
+  if (APP.activeTab === 'reservations') renderReservations();
+}
+
+function rerenderRoomsOnly(){
+  if (APP.activeTab === 'rooms' || APP.activeTab === 'dashboard') {
+    if (APP.activeTab === 'rooms') renderRooms();
+    if (APP.activeTab === 'dashboard') renderDashboard();
+  }
+}
+
+function rerenderReportsOnly(){
+  if (APP.activeTab === 'reports') renderReports();
+}
+
+function rerenderHousekeepingOnly(){
+  if (APP.activeTab === 'housekeeping') renderHousekeeping();
+  if (APP.activeTab === 'cleaningHistory') renderCleaningHistory();
+}
+
+function rerenderNonRoomOnly(){
+  if (APP.activeTab === 'nonRoomHousekeeping') renderNonRoomHousekeeping();
+  if (APP.activeTab === 'cleaningHistory') renderCleaningHistory();
+}
+
+function renderDashboard(){
+  const el = document.getElementById('dashboardSection');
+  if (!el) return;
+
+  el.innerHTML = `
+    <div class="stats">
+      ${statCard('Total Rooms', APP.dashboard.totalRooms)}
+      ${statCard('Occupied', APP.dashboard.occupied)}
+      ${statCard('Reserved', APP.dashboard.reserved)}
+      ${statCard('Dirty', APP.dashboard.dirty)}
+    </div>
+    <div class="panel">
+      <div class="section-title">
+        <strong>Room Overview</strong>
+        <span class="muted">${APP.rooms.length} rooms loaded from Google Sheets</span>
+      </div>
+      <div id="roomList" class="rooms-grid"></div>
+    </div>
+  `;
+
+  const list = document.getElementById('roomList');
+  list.innerHTML = '';
+
+  APP.rooms.forEach(function(r){
+    const div = document.createElement('div');
+    div.className = 'room-card';
+    div.innerHTML = `
+      <div class="room-head">
+        <div>
+          <h3>${escapeHtml(r.roomNo)}</h3>
+          <div class="subtle">${escapeHtml(r.roomType)}</div>
+        </div>
+        <div>${badge(r.status)}</div>
+      </div>
+      <div class="room-meta">
+        <span>Rate</span><strong>₦${fmt(r.rate)}</strong>
+        <span>Housekeeping</span><strong>${badge(r.housekeepingStatus)}</strong>
+        <span>Maintenance</span><strong>${badge(r.maintenanceStatus)}</strong>
+      </div>
+    `;
+    list.appendChild(div);
+  });
+}
+
+function renderRooms(){
+  const el = document.getElementById('roomsSection');
+  if (!el) return;
+
+  const apartmentGroups = [...new Set(APP.rooms.map(function(r){ return r.apartmentGroup; }).filter(Boolean))];
+
+  el.innerHTML = `
+    <div class="panel">
+      <div class="section-title">
+        <strong>Rooms & Apartments</strong>
+        <span class="muted">${APP.rooms.length} rooms • ${apartmentGroups.length} apartment groups</span>
+      </div>
+      <div id="roomListFull" class="rooms-grid"></div>
+    </div>
+  `;
+
+  const list = document.getElementById('roomListFull');
+  list.innerHTML = '';
+
+  APP.rooms.forEach(function(r){
+    const div = document.createElement('div');
+    div.className = 'room-card';
+    div.innerHTML = `
+      <div class="room-head">
+        <div>
+          <h3>${escapeHtml(r.roomNo)}</h3>
+          <div class="subtle">${escapeHtml(r.roomType)}</div>
+        </div>
+        <div>${badge(r.status)}</div>
+      </div>
+      <div class="room-meta">
+        <span>Rate</span><strong>₦${fmt(r.rate)}</strong>
+        <span>Apartment</span><strong>${escapeHtml(r.apartmentGroup || '-')}</strong>
+        <span>Housekeeping</span><strong>${badge(r.housekeepingStatus)}</strong>
+      </div>
+    `;
+    list.appendChild(div);
+  });
+}
+
+function getReservationOptions(){
+  const options = [];
+  const addedApartments = {};
+
+  APP.rooms.forEach(function(r){
+    if (r.apartmentGroup && !addedApartments[r.apartmentGroup]) {
+      addedApartments[r.apartmentGroup] = true;
+      options.push({
+        value: r.apartmentGroup,
+        label: `${r.apartmentGroup} - Apartment - ₦${fmt(APARTMENT_FIXED_RATE_CLIENT)}`
+      });
+    }
+  });
+
+  APP.rooms.forEach(function(r){
+    options.push({
+      value: r.roomNo,
+      label: `${r.roomNo} - ${r.roomType} - ₦${fmt(r.rate)}`
+    });
+  });
+
+  return options;
+}
+
+function checkMailAuthorizationUI(callback){
+  google.script.run
+    .withSuccessHandler(function(res){
+      if (typeof callback === 'function') callback(res);
+    })
+    .withFailureHandler(function(err){
+      if (typeof callback === 'function') {
+        callback({ ok:false, message:(err && err.message) || 'Mail authorization check failed.' });
+      }
+    })
+    .checkMailAuthorization();
+}
+
+function hardRefreshApp(){
+  google.script.run
+    .withSuccessHandler(function(res){
+      if (!res || !res.ok) {
+        toast((res && res.message) || 'Refresh failed', 'error');
+        return;
+      }
+
+      const currentTab = APP.activeTab || 'dashboard';
+
+      APP = {
+        user: res.user || null,
+        branding: res.branding || { hotelName:'NDDC Clubhouse', tagline:'Redefining Luxury Living', logoDataUri:'' },
+        dashboard: res.dashboard || { totalRooms:0, occupied:0, reserved:0, dirty:0 },
+        rooms: res.rooms || [],
+        reservations: res.reservations || [],
+        bookingHistory: res.bookingHistory || [],
+        housekeepingHistory: res.housekeepingHistory || [],
+        maintenanceHistory: res.maintenanceHistory || [],
+        cleaningHistory: res.cleaningHistory || [],
+        payments: res.paymentHistory || [],
+        paymentHistory: res.paymentHistory || [],
+        nonRoomAreas: res.nonRoomAreas || [],
+        nonRoomHousekeepingHistory: res.nonRoomHousekeepingHistory || [],
+        nonRoomCleaningHistory: res.nonRoomCleaningHistory || [],
+        users: res.users || [],
+        roles: res.roles || [],
+        channels: res.channels || [],
+        activeTab: currentTab,
+        reportRange: APP.reportRange || { start:'', end:'' },
+        cleaningReportRange: APP.cleaningReportRange || { start:'', end:'' },
+        cleaningReportUser: APP.cleaningReportUser || ''
+      };
+
+      renderAppShell();
+      renderActiveTab();
+      toast('Data refreshed.', 'success');
+    })
+    .withFailureHandler(function(err){
+      toast((err && err.message) || 'Refresh failed', 'error');
+    })
+    .getAppBootstrap();
+}
+
+function openReservationModal(editResId){
+  const existing = APP.reservations.find(function(r){ return r.resId === editResId; }) || null;
+  const today = new Date();
+  const tomorrow = new Date(today.getTime() + 86400000);
+  const roomOptions = getReservationOptions().map(function(opt){
+    return `<option value="${escapeAttr(opt.value)}" ${existing && existing.roomNo===opt.value ? 'selected' : ''}>${escapeHtml(opt.label)}</option>`;
+  }).join('');
+
+  showModal(existing ? 'Edit Reservation' : 'New Reservation', `
+    <div class="form-grid">
+      <div><label>Guest Name</label><input id="resGuestName" value="${escapeAttr(existing ? existing.guestName : '')}"></div>
+      <div><label>Phone</label><input id="resPhone" value="${escapeAttr(existing ? existing.phone : '')}"></div>
+      <div><label>Email (Optional)</label><input id="resEmail" type="email" value="${escapeAttr(existing ? existing.email : '')}"></div>
+      <div><label>Room / Apartment</label><select id="resRoomNo" onchange="updateReservationPricePreview()">${roomOptions}</select></div>
+      <div><label>Adults</label><input id="resAdults" type="number" min="1" max="2" value="${escapeAttr(existing ? existing.adults : 1)}"></div>
+      <div><label>Check In</label><input id="resCheckIn" type="date" value="${escapeAttr(existing ? existing.checkIn : today.toISOString().slice(0,10))}" onchange="updateReservationPricePreview()"></div>
+      <div><label>Check Out</label><input id="resCheckOut" type="date" value="${escapeAttr(existing ? existing.checkOut : tomorrow.toISOString().slice(0,10))}" onchange="updateReservationPricePreview()"></div>
+      <div><label>Discount %</label><input id="resDiscount" type="number" min="0" max="100" value="${escapeAttr(existing ? existing.discountPct : 0)}" onchange="updateReservationPricePreview()"></div>
+      <div>
+        <label>Payment Status</label>
+        <select id="resPaymentStatus" onchange="updateReservationPricePreview()">
+          <option ${(existing && existing.paymentStatus==='Unpaid') ? 'selected' : ''}>Unpaid</option>
+          <option ${(existing && existing.paymentStatus==='Paid') ? 'selected' : ''}>Paid</option>
+          <option ${(existing && existing.paymentStatus==='Part Paid') ? 'selected' : ''}>Part Paid</option>
+          <option ${(existing && existing.paymentStatus==='Free/PR') ? 'selected' : ''}>Free/PR</option>
+        </select>
+      </div>
+      <div><label>Channel</label><select id="resChannel">${APP.channels.map(function(c){ return `<option ${existing && existing.channel===c ? 'selected' : ''}>${escapeHtml(c)}</option>`; }).join('')}</select></div>
+      <div><label>RRR Number</label><input id="resRRR" value="${escapeAttr(existing ? (existing.rrrNumber || '') : '')}"></div>
+      <div class="full">
+        <div class="panel" style="margin:0">
+          <div><strong>Price Preview</strong></div>
+          <div id="reservationPricePreview" class="subtle">Calculating...</div>
+        </div>
+      </div>
+      <div class="full"><label>Notes</label><textarea id="resNotes">${escapeHtml(existing ? existing.notes : '')}</textarea></div>
+      <div class="full btn-row">
+        <button class="btn btn-primary" onclick="saveReservation(this, '${escapeJs(editResId || '')}')">${existing ? 'Update' : 'Save'} Reservation</button>
+        <button class="btn btn-dark" onclick="closeModal()">Cancel</button>
+      </div>
+    </div>
+  `);
+
+  updateReservationPricePreview();
+}
+
+function getSelectedReservationUnitRate(roomNo){
+  const grouped = APP.rooms.find(function(r){ return String(r.apartmentGroup || '') === String(roomNo); });
+  if (grouped) return APARTMENT_FIXED_RATE_CLIENT;
+
+  const room = APP.rooms.find(function(r){ return r.roomNo === roomNo; });
+  if (room) return Number(room.rate || 0);
+
+  return 0;
+}
+
+function nightsBetweenClient(checkIn, checkOut){
+  if (!checkIn || !checkOut) return 0;
+  const start = new Date(checkIn);
+  const end = new Date(checkOut);
+  if (isNaN(start.getTime()) || isNaN(end.getTime())) return 0;
+  return Math.max(0, Math.round((end - start) / 86400000));
+}
+
+function isFreePrClient(paymentStatus){
+  const v = String(paymentStatus || '').trim().toLowerCase();
+  return v === 'free/pr' || v === 'pr(free)' || v === 'free' || v === 'pr';
+}
+
+function updateReservationPricePreview(){
+  const roomNo = document.getElementById('resRoomNo')?.value || '';
+  const checkIn = document.getElementById('resCheckIn')?.value || '';
+  const checkOut = document.getElementById('resCheckOut')?.value || '';
+  const discountPct = Number(document.getElementById('resDiscount')?.value || 0);
+  const paymentStatus = document.getElementById('resPaymentStatus')?.value || 'Unpaid';
+  const target = document.getElementById('reservationPricePreview');
+  if (!target) return;
+
+  const nights = nightsBetweenClient(checkIn, checkOut);
+  const baseRate = getSelectedReservationUnitRate(roomNo);
+  const rate = isFreePrClient(paymentStatus) ? 0 : baseRate;
+  const gross = rate * nights;
+  const net = isFreePrClient(paymentStatus) ? 0 : Math.round(gross * (1 - discountPct / 100));
+
+  target.innerHTML = `
+    <div>Rate: ${formatMoney(rate)} per night</div>
+    <div>Nights: ${escapeHtml(String(nights))}</div>
+    <div>Discount: ${escapeHtml(String(discountPct))}%</div>
+    <div>Payment Status: ${escapeHtml(paymentStatus)}</div>
+    <div><strong>Total: ${formatMoney(net)}</strong></div>
+  `;
+}
+
+function saveReservation(btn, resId){
+  const payload = {
+    guestName: document.getElementById('resGuestName').value.trim(),
+    phone: document.getElementById('resPhone').value.trim(),
+    email: document.getElementById('resEmail').value.trim(),
+    roomNo: document.getElementById('resRoomNo').value,
+    adults: Number(document.getElementById('resAdults').value || 1),
+    checkIn: document.getElementById('resCheckIn').value,
+    checkOut: document.getElementById('resCheckOut').value,
+    discountPct: Number(document.getElementById('resDiscount').value || 0),
+    paymentStatus: document.getElementById('resPaymentStatus').value,
+    rrrNumber: document.getElementById('resRRR').value.trim(),
+    channel: document.getElementById('resChannel').value,
+    notes: document.getElementById('resNotes').value.trim()
+  };
+
+  setBusy(btn, true);
+  const runner = google.script.run
+    .withSuccessHandler(function(res){
+      setBusy(btn, false);
+      if (!res.ok) return toast(res.message || 'Reservation failed', 'error');
+
+      mergeAppData(res.data);
+      rerenderReservationsOnly();
+      rerenderRoomsOnly();
+      rerenderReportsOnly();
+      closeModal();
+      toast(res.message || 'Reservation saved', 'success');
+    })
+    .withFailureHandler(function(err){
+      setBusy(btn, false);
+      toast((err && err.message) || 'Reservation failed', 'error');
+    });
+
+  if (resId) runner.updateReservation(resId, payload);
+  else runner.createReservation(payload);
+}
+
+function renderReservations(){
+  const el = document.getElementById('reservationsSection');
+  if (!el) return;
+
+  const activeReservations = (APP.reservations || []).filter(function(r){
+    return r.status === 'Reserved' || r.status === 'Checked In';
+  });
+
+  el.innerHTML = `
+    <div class="panel">
+      <div class="section-title">
+        <strong>Reservations</strong>
+        <div class="btn-row">
+          <button class="btn btn-dark" onclick="hardRefreshApp()">Refresh</button>
+          <button class="btn btn-primary" onclick="openReservationModal()">Add Reservation</button>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Res ID</th>
+              <th>Guest</th>
+              <th>Room</th>
+              <th>Stay</th>
+              <th>Adults</th>
+              <th>Discount %</th>
+              <th>Net Amount</th>
+              <th>Channel</th>
+              <th>Status</th>
+              <th>Payment</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${activeReservations.length ? activeReservations.map(function(r){
+              return `
+                <tr>
+                  <td>${escapeHtml(r.resId)}</td>
+                  <td>
+                    ${escapeHtml(r.guestName)}
+                    <div class="subtle">${escapeHtml(r.phone || '')}</div>
+                    <div class="subtle">${escapeHtml(r.email || '')}</div>
+                  </td>
+                  <td>${escapeHtml(r.roomNo)}<div class="subtle">${escapeHtml(r.roomType || '')}</div></td>
+                  <td>${escapeHtml(r.checkIn)} → ${escapeHtml(r.checkOut)}<div class="subtle">${escapeHtml(String(r.nights))} night(s)</div></td>
+                  <td>${escapeHtml(String(r.adults))}</td>
+                  <td>${escapeHtml(String(r.discountPct || 0))}%</td>
+                  <td>₦${fmt(r.netAmount)}</td>
+                  <td>${escapeHtml(r.channel || '-')}</td>
+                  <td>${badge(r.status)}</td>
+                  <td>${badge(r.paymentStatus)}</td>
+                  <td>
+                    <div class="btn-row">
+                      ${r.status==='Reserved' ? `<button class="btn btn-outline" onclick="openReservationModal('${escapeJs(r.resId)}')">Edit</button>` : ''}
+                      ${r.status==='Reserved' ? `<button class="btn btn-outline" onclick="actionReservation('${escapeJs(r.resId)}','Check In', this)">Check In</button>` : ''}
+                      ${r.status==='Checked In' ? `<button class="btn btn-outline" onclick="checkoutReservation('${escapeJs(r.resId)}', this)">Check Out</button>` : ''}
+                      ${r.status==='Checked In' ? `<button class="btn btn-outline" onclick="openExtendStayModal('${escapeJs(r.resId)}')">Extend Stay</button>` : ''}
+                      ${r.status==='Checked In' ? `<button class="btn btn-primary" onclick="openLateCheckoutModal('${escapeJs(r.resId)}')">Late Checkout</button>` : ''}
+                      ${r.status==='Reserved' ? `<button class="btn btn-danger" onclick="actionReservation('${escapeJs(r.resId)}','Cancel', this)">Cancel</button>` : ''}
+                    </div>
+                  </td>
+                </tr>
+              `;
+            }).join('') : `<tr><td colspan="11" class="empty">No active reservations</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+function actionReservation(resId, action, btn){
+  setBusy(btn, true);
+  google.script.run
+    .withSuccessHandler(function(res){
+      setBusy(btn, false);
+      if (!res.ok) return toast(res.message || (action + ' failed'), 'error');
+
+      mergeAppData(res.data);
+      rerenderReservationsOnly();
+      rerenderRoomsOnly();
+      rerenderReportsOnly();
+      toast(res.message || (action + ' completed'), 'success');
+    })
+    .withFailureHandler(function(err){
+      setBusy(btn, false);
+      toast((err && err.message) || (action + ' failed'), 'error');
+    })
+    .processReservationAction(resId, action);
+}
+
+function checkoutReservation(resId, btn){
+  setBusy(btn, true);
+  google.script.run
+    .withSuccessHandler(function(res){
+      setBusy(btn, false);
+      if (!res.ok) return toast(res.message || 'Check Out failed', 'error');
+
+      mergeAppData(res.data);
+      rerenderReservationsOnly();
+      rerenderRoomsOnly();
+      rerenderReportsOnly();
+      toast(res.message || 'Check Out completed.', 'success');
+      openCheckoutReceiptOptions(resId);
+    })
+    .withFailureHandler(function(err){
+      setBusy(btn, false);
+      toast((err && err.message) || 'Check Out failed', 'error');
+    })
+    .processReservationAction(resId, 'Check Out');
+}
+
+function openExtendStayModal(resId){
+  const row = APP.reservations.find(function(r){ return r.resId === resId; });
+  if (!row) return toast('Reservation not found.', 'error');
+
+  const currentCheckout = parseDateValue(row.checkOut, true) || new Date();
+  const suggested = new Date(currentCheckout.getTime() + 86400000);
+  const suggestedDate = suggested.toISOString().slice(0,10);
+
+  showModal('Extend Stay', `
+    <div class="form-grid">
+      <div><label>Reservation ID</label><input value="${escapeAttr(row.resId)}" readonly></div>
+      <div><label>Guest Name</label><input value="${escapeAttr(row.guestName)}" readonly></div>
+      <div><label>Room</label><input value="${escapeAttr(row.roomNo)}" readonly></div>
+      <div><label>Current Check Out</label><input value="${escapeAttr(row.checkOut || '')}" readonly></div>
+      <div><label>New Check Out</label><input id="extendStayDate" type="date" value="${escapeAttr(suggestedDate)}"></div>
+      <div><label>RRR Number</label><input id="extendStayRRR" value="${escapeAttr(row.rrrNumber || '')}"></div>
+      <div class="full btn-row">
+        <button class="btn btn-primary" onclick="saveExtendStay(this, '${escapeJs(row.resId)}')">Save Extension</button>
+        <button class="btn btn-dark" onclick="closeModal()">Cancel</button>
+      </div>
+    </div>
+  `);
+}
+
+function saveExtendStay(btn, resId){
+  const payload = {
+    resId: resId,
+    newCheckOut: document.getElementById('extendStayDate').value,
+    rrrNumber: document.getElementById('extendStayRRR').value.trim()
+  };
+
+  if (!payload.newCheckOut) return toast('Please select a new checkout date.', 'error');
+
+  setBusy(btn, true);
+  google.script.run
+    .withSuccessHandler(function(res){
+      setBusy(btn, false);
+      if (!res.ok) return toast(res.message || 'Extend stay failed', 'error');
+
+      mergeAppData(res.data);
+      rerenderReservationsOnly();
+      rerenderReportsOnly();
+      closeModal();
+      toast(res.message || 'Stay extended successfully.', 'success');
+    })
+    .withFailureHandler(function(err){
+      setBusy(btn, false);
+      toast((err && err.message) || 'Extend stay failed', 'error');
+    })
+    .extendStay(payload);
+}
+
+function openLateCheckoutModal(resId){
+  const row = APP.reservations.find(function(r){ return r.resId === resId; });
+  if (!row) return toast('Reservation not found.', 'error');
+
+  const amount = computeLateCheckoutAmount(row);
+
+  showModal('Late Checkout', `
+    <div class="form-grid">
+      <div><label>Reservation ID</label><input value="${escapeAttr(row.resId)}" readonly></div>
+      <div><label>Guest Name</label><input value="${escapeAttr(row.guestName)}" readonly></div>
+      <div><label>Room</label><input value="${escapeAttr(row.roomNo)}" readonly></div>
+      <div><label>Late Checkout Fee</label><input id="lateCheckoutAmount" type="number" min="0" value="${escapeAttr(amount)}"></div>
+      <div><label>RRR Number</label><input id="lateCheckoutRRR" value="${escapeAttr(row.rrrNumber || '')}"></div>
+      <div class="full"><label>Note</label><textarea id="lateCheckoutNote" placeholder="Optional note"></textarea></div>
+      <div class="full btn-row">
+        <button class="btn btn-primary" onclick="saveLateCheckout(this, '${escapeJs(row.resId)}')">Save Late Checkout</button>
+        <button class="btn btn-dark" onclick="closeModal()">Cancel</button>
+      </div>
+    </div>
+  `);
+}
+
+function saveLateCheckout(btn, resId){
+  const payload = {
+    resId: resId,
+    amount: Number(document.getElementById('lateCheckoutAmount').value || 0),
+    rrrNumber: document.getElementById('lateCheckoutRRR').value.trim(),
+    note: document.getElementById('lateCheckoutNote').value.trim()
+  };
+
+  setBusy(btn, true);
+  google.script.run
+    .withSuccessHandler(function(res){
+      setBusy(btn, false);
+      if (!res.ok) return toast(res.message || 'Late checkout failed', 'error');
+
+      mergeAppData(res.data);
+      rerenderReservationsOnly();
+      rerenderReportsOnly();
+      closeModal();
+      toast(res.message || 'Late checkout saved', 'success');
+    })
+    .withFailureHandler(function(err){
+      setBusy(btn, false);
+      toast((err && err.message) || 'Late checkout failed', 'error');
+    })
+    .applyLateCheckout(payload);
+}
+
+function renderHousekeeping(){
+  const el = document.getElementById('housekeepingSection');
+  if (!el) return;
+
+  el.innerHTML = `
+    <div class="panel">
+      <div class="section-title"><strong>Room Housekeeping</strong><span class="muted">Update room cleanliness and maintenance</span></div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Room</th>
+              <th>Type</th>
+              <th>Status</th>
+              <th>Housekeeping</th>
+              <th>Maintenance</th>
+              <th>Last Cleaned</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${APP.rooms.map(function(r){
+              return `
+                <tr>
+                  <td>${escapeHtml(r.roomNo)}</td>
+                  <td>${escapeHtml(r.roomType)}</td>
+                  <td>${badge(r.status)}</td>
+                  <td>${badge(r.housekeepingStatus)}</td>
+                  <td>${badge(r.maintenanceStatus)}</td>
+                  <td>${escapeHtml(r.lastCleaned || '-')}</td>
+                  <td>
+                    <div class="btn-row">
+                      ${String(r.housekeepingStatus).toLowerCase() === 'dirty'
+                        ? `<button class="btn btn-outline" onclick="actionRoomCleaning('${escapeJs(r.roomNo)}','Cleaning In Progress', this)">Start</button>`
+                        : ''}
+                      ${String(r.housekeepingStatus).toLowerCase() === 'cleaning in progress'
+                        ? `<button class="btn btn-outline" onclick="joinRoomCleaningAction('${escapeJs(r.roomNo)}', this)">Join Cleaning</button>`
+                        : ''}
+                      ${String(r.housekeepingStatus).toLowerCase() === 'cleaning in progress'
+                        ? `<button class="btn btn-primary" onclick="completeRoomCleaning('${escapeJs(r.roomNo)}')">Mark Clean</button>`
+                        : ''}
+                      ${String(r.housekeepingStatus).toLowerCase() === 'clean'
+                        ? `<button class="btn btn-outline" onclick="markRoomAired('${escapeJs(r.roomNo)}', this)">Mark as Aired</button>`
+                        : ''}
+                      ${String(r.housekeepingStatus).toLowerCase() !== 'dirty'
+                        ? `<button class="btn btn-dark" onclick="actionRoomCleaning('${escapeJs(r.roomNo)}','Dirty', this)">Reset Dirty</button>`
+                        : ''}
+                    </div>
+                  </td>
+                </tr>
+              `;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>
+
+      <div class="section-title" style="margin-top:20px"><strong>Housekeeping Log</strong></div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Log ID</th>
+              <th>Room</th>
+              <th>From</th>
+              <th>To</th>
+              <th>By</th>
+              <th>Date</th>
+              <th>Count</th>
+              <th>Note</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${APP.housekeepingHistory.length ? APP.housekeepingHistory.map(function(r){
+              return `
+                <tr>
+                  <td>${escapeHtml(r.logId)}</td>
+                  <td>${escapeHtml(r.roomNo)}</td>
+                  <td>${escapeHtml(r.previousStatus || '-')}</td>
+                  <td>${escapeHtml(r.newStatus || '-')}</td>
+                  <td>${escapeHtml(r.changedBy || '-')}</td>
+                  <td>${escapeHtml(r.dateTime || '-')}</td>
+                  <td>${escapeHtml(String(r.cleaningCount || 0))}</td>
+                  <td>${escapeHtml(r.note || '-')}</td>
+                </tr>
+              `;
+            }).join('') : `<tr><td colspan="8" class="empty">No housekeeping logs</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+function actionRoomCleaning(roomNo, status, btn){
+  setBusy(btn, true);
+  google.script.run
+    .withSuccessHandler(function(res){
+      setBusy(btn, false);
+      if (!res.ok) return toast(res.message || 'Room update failed', 'error');
+
+      mergeAppData(res.data);
+      rerenderHousekeepingOnly();
+      rerenderRoomsOnly();
+      toast(res.message || 'Room updated', 'success');
+    })
+    .withFailureHandler(function(err){
+      setBusy(btn, false);
+      toast((err && err.message) || 'Room update failed', 'error');
+    })
+    .updateRoomHousekeeping(roomNo, status);
+}
+
+function markRoomAired(roomNo, btn){
+  setBusy(btn, true);
+  google.script.run
+    .withSuccessHandler(function(res){
+      setBusy(btn, false);
+      if (!res.ok) return toast(res.message || 'Could not mark room as aired', 'error');
+
+      mergeAppData(res.data);
+      rerenderHousekeepingOnly();
+      toast(res.message || 'Room marked as aired.', 'success');
+    })
+    .withFailureHandler(function(err){
+      setBusy(btn, false);
+      toast((err && err.message) || 'Could not mark room as aired', 'error');
+    })
+    .addAiredLog(roomNo, 'Room aired');
+}
+
+function joinRoomCleaningAction(roomNo, btn){
+  setBusy(btn, true);
+  google.script.run
+    .withSuccessHandler(function(res){
+      setBusy(btn, false);
+      if (!res.ok) return toast(res.message || 'Could not join cleaning', 'error');
+
+      mergeAppData(res.data);
+      rerenderHousekeepingOnly();
+      toast(res.message || 'Joined cleaning successfully.', 'success');
+    })
+    .withFailureHandler(function(err){
+      setBusy(btn, false);
+      toast((err && err.message) || 'Could not join cleaning', 'error');
+    })
+    .joinRoomCleaning(roomNo);
+}
+
+function completeRoomCleaning(roomNo){
+  showModal('Complete Room Cleaning', `
+    <div class="form-grid">
+      <div class="full"><label>Cleaning Note</label><textarea id="roomCleaningNote" placeholder="Optional note"></textarea></div>
+      <div class="full btn-row">
+        <button class="btn btn-primary" onclick="submitCompleteRoomCleaning('${escapeJs(roomNo)}', this)">Save</button>
+        <button class="btn btn-dark" onclick="closeModal()">Cancel</button>
+      </div>
+    </div>
+  `);
+}
+
+function submitCompleteRoomCleaning(roomNo, btn){
+  const note = document.getElementById('roomCleaningNote').value.trim();
+  setBusy(btn, true);
+  google.script.run
+    .withSuccessHandler(function(res){
+      setBusy(btn, false);
+      if (!res.ok) return toast(res.message || 'Could not complete cleaning', 'error');
+
+      mergeAppData(res.data);
+      closeModal();
+      rerenderHousekeepingOnly();
+      rerenderRoomsOnly();
+      toast(res.message || 'Cleaning completed', 'success');
+    })
+    .withFailureHandler(function(err){
+      setBusy(btn, false);
+      toast((err && err.message) || 'Could not complete cleaning', 'error');
+    })
+    .finishRoomCleaning(roomNo, note);
+}
+
+function renderNonRoomHousekeeping(){
+  const el = document.getElementById('nonRoomSection');
+  if (!el) return;
+
+  el.innerHTML = `
+    <div class="panel">
+      <div class="section-title"><strong>Non-Room Housekeeping</strong><span class="muted">Track cleanliness of lobby, reception, restaurant and more</span></div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Area</th>
+              <th>Status</th>
+              <th>Last Cleaned</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${APP.nonRoomAreas.length ? APP.nonRoomAreas.map(function(r){
+              return `
+                <tr>
+                  <td>${escapeHtml(r.area)}</td>
+                  <td>${badge(r.status)}</td>
+                  <td>${escapeHtml(r.lastCleaned || '-')}</td>
+                  <td>
+                    <div class="btn-row">
+                      ${String(r.status).toLowerCase() === 'dirty'
+                        ? `<button class="btn btn-outline" onclick="actionNonRoomCleaning('${escapeJs(r.area)}','Cleaning In Progress', this)">Start</button>`
+                        : ''}
+                      ${String(r.status).toLowerCase() === 'cleaning in progress'
+                        ? `<button class="btn btn-outline" onclick="joinNonRoomCleaningAction('${escapeJs(r.area)}', this)">Join Cleaning</button>`
+                        : ''}
+                      ${String(r.status).toLowerCase() === 'cleaning in progress'
+                        ? `<button class="btn btn-primary" onclick="completeNonRoomCleaning('${escapeJs(r.area)}')">Mark Clean</button>`
+                        : ''}
+                      ${String(r.status).toLowerCase() !== 'dirty'
+                        ? `<button class="btn btn-dark" onclick="actionNonRoomCleaning('${escapeJs(r.area)}','Dirty', this)">Reset Dirty</button>`
+                        : ''}
+                    </div>
+                  </td>
+                </tr>
+              `;
+            }).join('') : `<tr><td colspan="4" class="empty">No non-room areas found</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+
+      <div class="section-title" style="margin-top:20px"><strong>Non-Room Housekeeping Log</strong></div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Log ID</th>
+              <th>Area</th>
+              <th>From</th>
+              <th>To</th>
+              <th>By</th>
+              <th>Date</th>
+              <th>Count</th>
+              <th>Note</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${APP.nonRoomHousekeepingHistory.length ? APP.nonRoomHousekeepingHistory.map(function(r){
+              return `
+                <tr>
+                  <td>${escapeHtml(r.logId)}</td>
+                  <td>${escapeHtml(r.area)}</td>
+                  <td>${escapeHtml(r.previousStatus || '-')}</td>
+                  <td>${escapeHtml(r.newStatus || '-')}</td>
+                  <td>${escapeHtml(r.changedBy || '-')}</td>
+                  <td>${escapeHtml(r.dateTime || '-')}</td>
+                  <td>${escapeHtml(String(r.cleaningCount || 0))}</td>
+                  <td>${escapeHtml(r.note || '-')}</td>
+                </tr>
+              `;
+            }).join('') : `<tr><td colspan="8" class="empty">No non-room logs</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+function actionNonRoomCleaning(area, status, btn){
+  setBusy(btn, true);
+
+  const runner = google.script.run
+    .withSuccessHandler(function(res){
+      setBusy(btn, false);
+      if (!res.ok) return toast(res.message || 'Area update failed', 'error');
+
+      mergeAppData(res.data);
+      rerenderNonRoomOnly();
+      toast(res.message || 'Area updated', 'success');
+    })
+    .withFailureHandler(function(err){
+      setBusy(btn, false);
+      toast((err && err.message) || 'Area update failed', 'error');
+    });
+
+  if (String(status).toLowerCase() === 'cleaning in progress') {
+    runner.startNonRoomCleaning(area);
+  } else {
+    runner.updateNonRoomHousekeeping(area, status, '');
+  }
+}
+
+function joinNonRoomCleaningAction(area, btn){
+  setBusy(btn, true);
+  google.script.run
+    .withSuccessHandler(function(res){
+      setBusy(btn, false);
+      if (!res.ok) return toast(res.message || 'Could not join cleaning', 'error');
+
+      mergeAppData(res.data);
+      rerenderNonRoomOnly();
+      toast(res.message || 'Joined cleaning successfully.', 'success');
+    })
+    .withFailureHandler(function(err){
+      setBusy(btn, false);
+      toast((err && err.message) || 'Could not join cleaning', 'error');
+    })
+    .joinNonRoomCleaning(area);
+}
+
+function completeNonRoomCleaning(area){
+  showModal('Complete Non-Room Cleaning', `
+    <div class="form-grid">
+      <div class="full"><label>Cleaning Note</label><textarea id="nonRoomCleaningNote" placeholder="Optional note"></textarea></div>
+      <div class="full btn-row">
+        <button class="btn btn-primary" onclick="submitCompleteNonRoomCleaning('${escapeJs(area)}', this)">Save</button>
+        <button class="btn btn-dark" onclick="closeModal()">Cancel</button>
+      </div>
+    </div>
+  `);
+}
+
+function submitCompleteNonRoomCleaning(area, btn){
+  const note = document.getElementById('nonRoomCleaningNote').value.trim();
+  setBusy(btn, true);
+  google.script.run
+    .withSuccessHandler(function(res){
+      setBusy(btn, false);
+      if (!res.ok) return toast(res.message || 'Could not complete cleaning', 'error');
+
+      mergeAppData(res.data);
+      closeModal();
+      rerenderNonRoomOnly();
+      toast(res.message || 'Cleaning completed', 'success');
+    })
+    .withFailureHandler(function(err){
+      setBusy(btn, false);
+      toast((err && err.message) || 'Could not complete cleaning', 'error');
+    })
+    .finishNonRoomCleaning(area, note);
+}
+
+function renderCleaningHistory(){
+  const el = document.getElementById('cleaningHistorySection');
+  if (!el) return;
+
+  el.innerHTML = `
+    <div class="panel">
+      <div class="section-title"><strong>Room Cleaning History</strong></div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Session</th>
+              <th>Room</th>
+              <th>Status</th>
+              <th>Started</th>
+              <th>Started By</th>
+              <th>Joined By</th>
+              <th>Finished</th>
+              <th>Finished By</th>
+              <th>Duration</th>
+              <th>Note</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${APP.cleaningHistory.length ? APP.cleaningHistory.map(function(r){
+              return `
+                <tr>
+                  <td>${escapeHtml(r.sessionId)}</td>
+                  <td>${escapeHtml(r.roomNo)}</td>
+                  <td>${escapeHtml(r.status || '-')}</td>
+                  <td>${escapeHtml(r.startedAt || '-')}</td>
+                  <td>${escapeHtml(r.startedBy || '-')}</td>
+                  <td>${escapeHtml(r.joinedBy || '-')}</td>
+                  <td>${escapeHtml(r.finishedAt || '-')}</td>
+                  <td>${escapeHtml(r.finishedBy || '-')}</td>
+                  <td>${escapeHtml(String(r.durationMins || '-'))}</td>
+                  <td>${escapeHtml(r.cleaningNote || '-')}</td>
+                </tr>
+              `;
+            }).join('') : `<tr><td colspan="10" class="empty">No room cleaning history</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+
+      <div class="section-title" style="margin-top:20px"><strong>Non-Room Cleaning History</strong></div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Session</th>
+              <th>Area</th>
+              <th>Status</th>
+              <th>Started</th>
+              <th>Started By</th>
+              <th>Joined By</th>
+              <th>Finished</th>
+              <th>Finished By</th>
+              <th>Duration</th>
+              <th>Note</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${APP.nonRoomCleaningHistory.length ? APP.nonRoomCleaningHistory.map(function(r){
+              return `
+                <tr>
+                  <td>${escapeHtml(r.sessionId)}</td>
+                  <td>${escapeHtml(r.area)}</td>
+                  <td>${escapeHtml(r.status || '-')}</td>
+                  <td>${escapeHtml(r.startedAt || '-')}</td>
+                  <td>${escapeHtml(r.startedBy || '-')}</td>
+                  <td>${escapeHtml(r.joinedBy || '-')}</td>
+                  <td>${escapeHtml(r.finishedAt || '-')}</td>
+                  <td>${escapeHtml(r.finishedBy || '-')}</td>
+                  <td>${escapeHtml(String(r.durationMins || '-'))}</td>
+                  <td>${escapeHtml(r.cleaningNote || '-')}</td>
+                </tr>
+              `;
+            }).join('') : `<tr><td colspan="10" class="empty">No non-room cleaning history</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+function renderBookingHistory(){
+  const el = document.getElementById('bookingHistorySection');
+  if (!el) return;
+
+  el.innerHTML = `
+    <div class="panel">
+      <div class="section-title"><strong>Booking History</strong></div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Res ID</th>
+              <th>Guest</th>
+              <th>Room</th>
+              <th>Stay</th>
+              <th>Actual Check Out</th>
+              <th>Late Checkout</th>
+              <th>Amount</th>
+              <th>Payment</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${APP.bookingHistory.length ? APP.bookingHistory.map(function(r){
+              return `
+                <tr>
+                  <td>${escapeHtml(r.resId)}</td>
+                  <td>
+                    ${escapeHtml(r.guestName)}
+                    <div class="subtle">${escapeHtml(r.phone || '')}</div>
+                    <div class="subtle">${escapeHtml(r.email || '')}</div>
+                  </td>
+                  <td>${escapeHtml(r.roomNo)}</td>
+                  <td>${escapeHtml(r.checkIn)} → ${escapeHtml(r.checkOut)}</td>
+                  <td>${escapeHtml(r.actualCheckout || '-')}</td>
+                  <td>${escapeHtml(r.lateCheckout || 'No')}<div class="subtle">${r.lateCheckoutAmount ? '₦' + fmt(r.lateCheckoutAmount) : ''}</div></td>
+                  <td>₦${fmt(r.netAmount)}</td>
+                  <td>${badge(r.paymentStatus)}</td>
+                  <td>${badge(r.status)}</td>
+                </tr>
+              `;
+            }).join('') : `<tr><td colspan="9" class="empty">No booking history</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+function renderPaymentHistory(){
+  const el = document.getElementById('paymentHistorySection');
+  if (!el) return;
+
+  const payRows = APP.paymentHistory || APP.payments || [];
+
+  el.innerHTML = `
+    <div class="panel">
+      <div class="section-title"><strong>Payment History</strong></div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Payment ID</th>
+              <th>Res ID</th>
+              <th>Guest</th>
+              <th>Room</th>
+              <th>Type</th>
+              <th>Amount</th>
+              <th>RRR</th>
+              <th>Date</th>
+              <th>Receipt</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${payRows.length ? payRows.map(function(r){
+              return `
+                <tr>
+                  <td>${escapeHtml(r.paymentId)}</td>
+                  <td>${escapeHtml(r.resId)}</td>
+                  <td>${escapeHtml(r.guestName)}</td>
+                  <td>${escapeHtml(r.roomNo)}</td>
+                  <td>${escapeHtml(r.paymentType)}</td>
+                  <td>₦${fmt(r.amount)}</td>
+                  <td>${escapeHtml(r.rrrNumber || '-')}</td>
+                  <td>${escapeHtml(r.paymentDate || '-')}</td>
+                  <td>${r.receipt ? `<a class="linkish" href="${escapeAttr(r.receipt)}" target="_blank">View</a>` : escapeHtml(r.receiptName || '-')}</td>
+                </tr>
+              `;
+            }).join('') : `<tr><td colspan="9" class="empty">No payment records</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+function openCheckoutReceiptOptions(resId){
+  google.script.run
+    .withSuccessHandler(function(res){
+      if (!res || !res.ok) return toast((res && res.message) || 'Could not load receipt.', 'error');
+      const data = res.data || {};
+      showModal('Checkout Receipt Options', `
+        <div class="form-grid">
+          <div><label>Reservation ID</label><input value="${escapeAttr(data.resId || '')}" readonly></div>
+          <div><label>Guest Name</label><input value="${escapeAttr(data.guestName || '')}" readonly></div>
+          <div><label>Email</label><input id="checkoutReceiptEmail" type="email" value="${escapeAttr(data.email || '')}" placeholder="guest@email.com"></div>
+          <div class="full">
+            <div class="panel" style="margin:0">
+              <div><strong>Receipt Summary</strong></div>
+              <div class="subtle">Room: ${escapeHtml(data.roomNo || '')} ${data.roomType ? ' - ' + escapeHtml(data.roomType) : ''}</div>
+              <div class="subtle">Stay: ${escapeHtml(data.checkIn || '')} → ${escapeHtml(data.checkOut || '')}</div>
+              <div class="subtle">Total Paid: ${escapeHtml(formatMoney(data.totalPaid || 0))}</div>
+            </div>
+          </div>
+          <div class="full btn-row">
+            <button class="btn btn-outline" onclick="downloadCheckoutReceiptPdf(this, '${escapeJs(resId)}')">Print / Download PDF</button>
+            <button class="btn btn-primary" onclick="sendCheckoutReceiptEmail(this, '${escapeJs(resId)}')">Send to Email</button>
+            <button class="btn btn-dark" onclick="closeModal()">Close</button>
+          </div>
+        </div>
+      `);
+    })
+    .withFailureHandler(function(err){
+      toast((err && err.message) || 'Could not load receipt.', 'error');
+    })
+    .getCheckoutReceiptData(resId);
+}
+
+function downloadCheckoutReceiptPdf(btn, resId){
+  setBusy(btn, true);
+  google.script.run
+    .withSuccessHandler(function(res){
+      setBusy(btn, false);
+      if (!res.ok) return toast(res.message || 'Receipt download failed', 'error');
+      downloadBase64File(res.fileName || 'checkout-receipt.pdf', res.mimeType || 'application/pdf', res.base64 || '');
+      toast(res.message || 'Receipt ready.', 'success');
+    })
+    .withFailureHandler(function(err){
+      setBusy(btn, false);
+      toast((err && err.message) || 'Receipt download failed', 'error');
+    })
+    .buildCheckoutReceiptPdf({ resId: resId });
+}
+
+function sendCheckoutReceiptEmail(btn, resId){
+  checkMailAuthorizationUI(function(auth){
+    if (!auth || !auth.ok) {
+      toast('Email is not authorized yet. Admin should run authorizeMail() in Apps Script first.', 'error');
+      return;
+    }
+
+    const email = (document.getElementById('checkoutReceiptEmail')?.value || '').trim();
+    setBusy(btn, true);
+
+    google.script.run
+      .withSuccessHandler(function(res){
+        setBusy(btn, false);
+        if (!res.ok) return toast(res.message || 'Could not send receipt email', 'error');
+        toast(res.message || 'Receipt sent successfully.', 'success');
+      })
+      .withFailureHandler(function(err){
+        setBusy(btn, false);
+        toast((err && err.message) || 'Could not send receipt email', 'error');
+      })
+      .emailCheckoutReceipt({ resId: resId, email: email });
+  });
+}
+
+function renderReports(){
+  const el = document.getElementById('reportSection');
+  if (!el) return;
+
+  const bookingRows = getBookingReportRows();
+  const paymentRows = getPaymentReportRows();
+  const cleaningReport = getCleaningReportDataForView();
+  const canSelectUser = APP.user && APP.user.role !== 'Housekeeping';
+  const users = getCleaningReportUsers();
+
+  el.innerHTML = `
+    <div class="panel">
+      <div class="section-title">
+        <strong>Reports</strong>
+        <span class="muted">Print or download booking, payment and cleaning reports</span>
+      </div>
+
+      <div class="filters-grid">
+        <div>
+          <label>Booking / Payment Start</label>
+          <input id="reportStartDate" type="date" value="${escapeAttr(APP.reportRange.start || '')}" onchange="updateReportRange()">
+        </div>
+        <div>
+          <label>Booking / Payment End</label>
+          <input id="reportEndDate" type="date" value="${escapeAttr(APP.reportRange.end || '')}" onchange="updateReportRange()">
+        </div>
+        <div class="btn-row align-end">
+          <button class="btn btn-dark" onclick="clearReportRange()">Clear</button>
+          <button class="btn btn-outline" onclick="printBookingPaymentReport()">Print</button>
+          <button class="btn btn-primary" onclick="downloadBookingPaymentReportPdfAction(this)">Download PDF</button>
+        </div>
+      </div>
+
+      <div class="stats" style="margin-top:12px">
+        ${statCard('Bookings in range', bookingRows.length)}
+        ${statCard('Payments in range', paymentRows.length)}
+        ${statCard('Payment Total', formatMoney(paymentRows.reduce(function(sum, row){ return sum + Number(row.amount || 0); }, 0)))}
+      </div>
+
+      <div class="section-title" style="margin-top:20px"><strong>Booking / Payment Preview</strong></div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Type</th>
+              <th>Reference</th>
+              <th>Guest</th>
+              <th>Room</th>
+              <th>Amount</th>
+              <th>Date</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${[
+              ...bookingRows.map(function(r){
+                return {
+                  type:'Booking',
+                  ref:r.resId,
+                  guest:r.guestName,
+                  room:r.roomNo,
+                  amount:r.netAmount,
+                  date:r.createdAt || r.checkIn || ''
+                };
+              }),
+              ...paymentRows.map(function(r){
+                return {
+                  type:r.paymentType || 'Payment',
+                  ref:r.paymentId,
+                  guest:r.guestName,
+                  room:r.roomNo,
+                  amount:r.amount,
+                  date:r.paymentDate || ''
+                };
+              })
+            ].sort(function(a,b){
+              return String(b.date || '').localeCompare(String(a.date || ''));
+            }).map(function(r){
+              return `
+                <tr>
+                  <td>${escapeHtml(r.type)}</td>
+                  <td>${escapeHtml(r.ref || '-')}</td>
+                  <td>${escapeHtml(r.guest || '-')}</td>
+                  <td>${escapeHtml(r.room || '-')}</td>
+                  <td>${formatMoney(r.amount)}</td>
+                  <td>${escapeHtml(r.date || '-')}</td>
+                </tr>
+              `;
+            }).join('') || `<tr><td colspan="6" class="empty">No report rows in selected range</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+
+      <div class="section-title" style="margin-top:28px"><strong>Cleaning Reports</strong></div>
+      <div class="filters-grid">
+        <div>
+          <label>Cleaning Start</label>
+          <input id="cleanReportStartDate" type="date" value="${escapeAttr(APP.cleaningReportRange.start || '')}" onchange="updateCleaningReportFilters()">
+        </div>
+        <div>
+          <label>Cleaning End</label>
+          <input id="cleanReportEndDate" type="date" value="${escapeAttr(APP.cleaningReportRange.end || '')}" onchange="updateCleaningReportFilters()">
+        </div>
+        <div>
+          <label>User</label>
+          <select id="cleanReportUser" ${canSelectUser ? '' : 'disabled'} onchange="updateCleaningReportFilters()">
+            ${canSelectUser ? `<option value="">All Users</option>` : ''}
+            ${users.map(function(name){
+              return `<option value="${escapeAttr(name)}" ${((canSelectUser ? APP.cleaningReportUser : getCurrentCleaningReportUser()) === name) ? 'selected' : ''}>${escapeHtml(name)}</option>`;
+            }).join('')}
+          </select>
+        </div>
+        <div class="btn-row align-end">
+          <button class="btn btn-dark" onclick="clearCleaningReportFilters()">Clear</button>
+          <button class="btn btn-outline" onclick="printCleaningReport()">Print</button>
+          <button class="btn btn-primary" onclick="downloadCleaningReportPdfAction(this)">Download PDF</button>
+        </div>
+      </div>
+
+      <div class="stats" style="margin-top:12px">
+        ${statCard('Cleaning rows', cleaningReport.rows.length)}
+        ${statCard('Users shown', cleaningReport.summary.length)}
+        ${statCard('Total minutes', cleaningReport.totalMinutes)}
+      </div>
+
+      <div class="section-title" style="margin-top:20px"><strong>Cleaning Summary</strong></div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>User</th>
+              <th>Room Sessions</th>
+              <th>Non-Room Sessions</th>
+              <th>Total Minutes</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${cleaningReport.summary.length ? cleaningReport.summary.map(function(r){
+              return `
+                <tr>
+                  <td>${escapeHtml(r.user)}</td>
+                  <td>${escapeHtml(String(r.roomSessions))}</td>
+                  <td>${escapeHtml(String(r.nonRoomSessions))}</td>
+                  <td>${escapeHtml(String(r.totalMinutes))}</td>
+                </tr>
+              `;
+            }).join('') : `<tr><td colspan="4" class="empty">No cleaning report data</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+
+      <div class="section-title" style="margin-top:20px"><strong>Cleaning Details</strong></div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>User</th>
+              <th>Type</th>
+              <th>Place</th>
+              <th>Date</th>
+              <th>Duration</th>
+              <th>Note</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${cleaningReport.rows.length ? cleaningReport.rows.map(function(r){
+              return `
+                <tr>
+                  <td>${escapeHtml(r.user)}</td>
+                  <td>${escapeHtml(r.placeType)}</td>
+                  <td>${escapeHtml(r.place)}</td>
+                  <td>${escapeHtml(r.startedAt || '-')}</td>
+                  <td>${escapeHtml(String(r.durationMins || 0))}</td>
+                  <td>${escapeHtml(r.note || '-')}</td>
+                </tr>
+              `;
+            }).join('') : `<tr><td colspan="6" class="empty">No cleaning details</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+function renderMaintenance(){
+  const el = document.getElementById('maintenanceSection');
+  if (!el) return;
+
+  el.innerHTML = `
+    <div class="panel">
+      <div class="section-title">
+        <strong>Maintenance History</strong>
+        <div class="btn-row">
+          <button class="btn btn-primary" onclick="openMaintenanceModal()">New Log</button>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Log ID</th>
+              <th>Room</th>
+              <th>Note</th>
+              <th>Date</th>
+              <th>Status</th>
+              <th>Action By</th>
+              <th>Resolve</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${APP.maintenanceHistory.length ? APP.maintenanceHistory.map(function(r){
+              return `
+                <tr>
+                  <td>${escapeHtml(r.logId)}</td>
+                  <td>${escapeHtml(r.roomNo)}</td>
+                  <td>${escapeHtml(r.maintenanceNote || '-')}</td>
+                  <td>${escapeHtml(r.dateAdded || '-')}</td>
+                  <td>${badge(r.status || '-')}</td>
+                  <td>${escapeHtml(r.actionBy || '-')}</td>
+                  <td>
+                    ${String(r.status).toLowerCase() !== 'resolved'
+                      ? `<button class="btn btn-outline" onclick="actionResolveMaintenance('${escapeJs(r.logId)}','Resolved', this)">Resolve</button>`
+                      : `<span class="subtle">Done</span>`
+                    }
+                  </td>
+                </tr>
+              `;
+            }).join('') : `<tr><td colspan="7" class="empty">No maintenance logs</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+function renderAdmin(){
+  const el = document.getElementById('adminSection');
+  if (!el) return;
+
+  const canManageUsers = APP.user && APP.user.role === 'Admin';
+  const currentName = getCurrentCleaningReportUser();
+  const ownSummary = getCleaningReportDataForView().summary.find(function(x){ return x.user === currentName; });
+
+  el.innerHTML = `
+    <div class="panel">
+      <div class="section-title"><strong>Admin / User Management</strong></div>
+
+      ${canManageUsers ? `
+        <div class="form-grid" style="margin-bottom:20px">
+          <div><label>Username</label><input id="newUsername"></div>
+          <div><label>Password</label><input id="newPassword" type="password"></div>
+          <div><label>Full Name</label><input id="newFullName"></div>
+          <div><label>Role</label><select id="newRole">${APP.roles.map(function(r){ return `<option>${escapeHtml(r)}</option>`; }).join('')}</select></div>
+          <div class="full btn-row"><button class="btn btn-primary" onclick="saveUser(this)">Create User</button></div>
+        </div>
+      ` : `
+        <div class="stats">
+          ${statCard('My Room Sessions', ownSummary ? ownSummary.roomSessions : 0)}
+          ${statCard('My Non-Room Sessions', ownSummary ? ownSummary.nonRoomSessions : 0)}
+          ${statCard('My Total Minutes', ownSummary ? ownSummary.totalMinutes : 0)}
+        </div>
+      `}
+
+      <div class="section-title" style="margin-top:16px"><strong>Current Users</strong></div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>User ID</th>
+              <th>Username</th>
+              <th>Full Name</th>
+              <th>Role</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${(APP.users && APP.users.length ? APP.users : []).map(function(u){
+              return `
+                <tr>
+                  <td>${escapeHtml(u.userId || '-')}</td>
+                  <td>${escapeHtml(u.username || '-')}</td>
+                  <td>${escapeHtml(u.fullName || '-')}</td>
+                  <td>${escapeHtml(u.role || '-')}</td>
+                  <td>${badge(u.status || '-')}</td>
+                </tr>
+              `;
+            }).join('') || `<tr><td colspan="5" class="empty">No users found</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+function updateReportRange(){
+  APP.reportRange = {
+    start: document.getElementById('reportStartDate')?.value || '',
+    end: document.getElementById('reportEndDate')?.value || ''
+  };
+  renderReports();
+}
+
+function clearReportRange(){
+  APP.reportRange = { start:'', end:'' };
+  renderReports();
+}
+
+function updateCleaningReportFilters(){
+  APP.cleaningReportRange = {
+    start: document.getElementById('cleanReportStartDate')?.value || '',
+    end: document.getElementById('cleanReportEndDate')?.value || ''
+  };
+  const userEl = document.getElementById('cleanReportUser');
+  APP.cleaningReportUser = userEl ? userEl.value : APP.cleaningReportUser;
+  renderReports();
+}
+
+function clearCleaningReportFilters(){
+  APP.cleaningReportRange = { start:'', end:'' };
+  APP.cleaningReportUser = APP.user && APP.user.role === 'Housekeeping' ? getCurrentCleaningReportUser() : '';
+  renderReports();
+}
+
+function getBookingReportRows(){
+  return filterRowsByDateRange(APP.bookingHistory, APP.reportRange.start, APP.reportRange.end, ['createdAt','checkIn','updatedAt','actualCheckout']);
+}
+
+function getPaymentReportRows(){
+  const payRows = APP.paymentHistory || APP.payments || [];
+  return filterRowsByDateRange(payRows, APP.reportRange.start, APP.reportRange.end, ['paymentDate']);
+}
+
+function getCurrentCleaningReportUser(){
+  return (APP.user && (APP.user.fullName || APP.user.username)) || '';
+}
+
+function splitCsvNames(value){
+  return String(value || '').split(',').map(function(x){ return x.trim(); }).filter(Boolean);
+}
+
+function splitJoinTimes(value){
+  return String(value || '').split('|').map(function(x){ return x.trim(); }).filter(Boolean);
+}
+
+function parseJoinEntries(row){
+  const names = splitCsvNames(row.joinedBy || '');
+  const times = splitJoinTimes(row.joinTimes || '');
+  return names.map(function(name, i){
+    const raw = times[i] || '';
+    const atIndex = raw.indexOf('@');
+    const joinedAtRaw = atIndex > -1 ? raw.slice(atIndex + 1).trim() : raw.trim();
+    return {
+      name: name,
+      joinedAt: parseDateValue(joinedAtRaw, false)
+    };
+  }).filter(function(x){ return x.name; });
+}
+
+function extractCleaningParticipants(row){
+  const names = [];
+  [row.startedBy].forEach(function(name){
+    if (name && names.indexOf(name) === -1) names.push(name);
+  });
+  splitCsvNames(row.joinedBy || '').forEach(function(name){
+    if (name && names.indexOf(name) === -1) names.push(name);
+  });
+  return names.filter(Boolean);
+}
+
+function getCleaningReportUsers(){
+  const names = new Set();
+  [...APP.cleaningHistory, ...APP.nonRoomCleaningHistory].forEach(function(row){
+    extractCleaningParticipants(row).forEach(function(name){ names.add(name); });
+  });
+  const self = getCurrentCleaningReportUser();
+  if (self) names.add(self);
+  return Array.from(names).filter(Boolean).sort(function(a,b){ return a.localeCompare(b); });
+}
+
+function getCleaningReportDataForView(){
+  const targetUser = APP.user && APP.user.role === 'Housekeeping'
+    ? getCurrentCleaningReportUser()
+    : (APP.cleaningReportUser || '');
+
+  const rows = buildCleaningReportRows(targetUser, APP.cleaningReportRange.start, APP.cleaningReportRange.end);
+  const summaryMap = {};
+
+  rows.forEach(function(row){
+    if (!summaryMap[row.user]) summaryMap[row.user] = { user: row.user, roomSessions: 0, nonRoomSessions: 0, totalMinutes: 0 };
+    if (row.placeType === 'Room') summaryMap[row.user].roomSessions += 1;
+    if (row.placeType === 'Non-Room') summaryMap[row.user].nonRoomSessions += 1;
+    summaryMap[row.user].totalMinutes += Number(row.durationMins || 0);
+  });
+
+  const summary = Object.values(summaryMap).sort(function(a,b){ return a.user.localeCompare(b.user); });
+
+  return {
+    rows: rows,
+    summary: summary,
+    totalMinutes: rows.reduce(function(sum, row){ return sum + Number(row.durationMins || 0); }, 0),
+    targetUser: targetUser
+  };
+}
+
+function buildCleaningReportRows(targetUser, startDate, endDate){
+  const rows = [];
+
+  function pushRowsFromSession(row, placeType, place){
+    if (!isWithinRangeByFields(row, startDate, endDate, ['startedAt','finishedAt'])) return;
+
+    const sessionEnd = parseDateValue(row.finishedAt, true) || new Date();
+    const totalSessionMins = Number(row.durationMins || 0);
+
+    if (row.startedBy) {
+      rows.push({
+        user: row.startedBy,
+        placeType: placeType,
+        place: place,
+        startedAt: row.startedAt || row.finishedAt || '-',
+        durationMins: totalSessionMins,
+        note: row.cleaningNote || ''
+      });
+    }
+
+    parseJoinEntries(row).forEach(function(joiner){
+      if (!joiner.joinedAt || !sessionEnd) return;
+      const mins = Math.max(0, Math.round((sessionEnd - joiner.joinedAt) / 60000));
+      rows.push({
+        user: joiner.name,
+        placeType: placeType,
+        place: place,
+        startedAt: formatDateValue(joiner.joinedAt) || row.startedAt || '-',
+        durationMins: mins,
+        note: (row.cleaningNote || '') + (row.cleaningNote ? ' | ' : '') + 'Joined session'
+      });
+    });
+  }
+
+  APP.cleaningHistory.forEach(function(row){ pushRowsFromSession(row, 'Room', row.roomNo || '-'); });
+  APP.nonRoomCleaningHistory.forEach(function(row){ pushRowsFromSession(row, 'Non-Room', row.area || '-'); });
+
+  return rows
+    .filter(function(row){ return !targetUser || row.user === targetUser; })
+    .sort(function(a,b){ return String(b.startedAt || '').localeCompare(String(a.startedAt || '')); });
+}
+
+function filterRowsByDateRange(rows, startDate, endDate, fields){
+  return (rows || []).filter(function(row){
+    return isWithinRangeByFields(row, startDate, endDate, fields);
+  });
+}
+
+function isWithinRangeByFields(row, startDate, endDate, fields){
+  const start = startDate ? parseDateValue(startDate, false) : null;
+  const end = endDate ? parseDateValue(endDate, true) : null;
+  if (!start && !end) return true;
+
+  return (fields || []).some(function(field){
+    const value = row && row[field];
+    const parsed = parseDateValue(value, !!(typeof value === 'string' && value.length <= 10));
+    if (!parsed) return false;
+    if (start && parsed < start) return false;
+    if (end && parsed > end) return false;
+    return true;
+  });
+}
+
+function parseDateValue(value, endOfDay){
+  if (!value) return null;
+  if (value instanceof Date && !isNaN(value.getTime())) return value;
+  const raw = String(value).trim();
+  if (!raw) return null;
+  let normalized = raw;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) normalized = raw + (endOfDay ? 'T23:59:59' : 'T00:00:00');
+  else if (/^\d{1,2}\/\d{1,2}\/\d{2,4}$/.test(raw)) {
+    const parts = raw.split('/');
+    normalized = `${parts[2].length===2?'20'+parts[2]:parts[2]}-${String(parts[0]).padStart(2,'0')}-${String(parts[1]).padStart(2,'0')}${endOfDay ? 'T23:59:59' : 'T00:00:00'}`;
+  } else if (/^\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}$/.test(raw)) normalized = raw.replace(' ','T') + ':00';
+  const d = new Date(normalized);
+  return isNaN(d.getTime()) ? null : d;
+}
+
+function formatDateValue(value){
+  const d = parseDateValue(value, false);
+  if (!d) return '';
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth()+1).padStart(2,'0');
+  const dd = String(d.getDate()).padStart(2,'0');
+  const hh = String(d.getHours()).padStart(2,'0');
+  const mi = String(d.getMinutes()).padStart(2,'0');
+  return `${yyyy}-${mm}-${dd} ${hh}:${mi}`;
+}
+
+function buildBookingPaymentReportHtml(){
+  const bookingRows = getBookingReportRows();
+  const paymentRows = getPaymentReportRows();
+  const rangeText = `${APP.reportRange.start || 'Beginning'} to ${APP.reportRange.end || 'Today'}`;
+
+  return `
+    <html>
+      <head>
+        <title>Booking and Payment Report</title>
+        <style>
+          @page{size:A4 landscape;margin:14mm}
+          body{font-family:Arial,sans-serif;padding:24px;color:#111}
+          h1,h2{margin:0 0 10px}
+          .muted{color:#555;margin-bottom:16px}
+          table{width:100%;border-collapse:collapse;margin-bottom:24px}
+          th,td{border:1px solid #ddd;padding:8px;text-align:left;font-size:12px}
+          th{background:#f4f4f4}
+        </style>
+      </head>
+      <body>
+        <h1>Booking and Payment Report</h1>
+        <div class="muted">Range: ${escapeHtml(rangeText)}</div>
+        <h2>Booking History</h2>
+        <table>
+          <thead><tr><th>ID</th><th>Guest</th><th>Room</th><th>Stay</th><th>Amount</th><th>Payment</th><th>Status</th><th>Created</th></tr></thead>
+          <tbody>
+            ${bookingRows.map(function(r){
+              return `<tr><td>${escapeHtml(r.resId)}</td><td>${escapeHtml(r.guestName)}</td><td>${escapeHtml(r.roomNo)}</td><td>${escapeHtml(r.checkIn)} → ${escapeHtml(r.checkOut)}</td><td>${formatMoney(r.netAmount)}</td><td>${escapeHtml(r.paymentStatus || '-')}</td><td>${escapeHtml(r.status || '-')}</td><td>${escapeHtml(r.createdAt || '-')}</td></tr>`;
+            }).join('') || '<tr><td colspan="8">No booking records</td></tr>'}
+          </tbody>
+        </table>
+        <h2>Payment History</h2>
+        <table>
+          <thead><tr><th>Payment ID</th><th>Res ID</th><th>Guest</th><th>Room</th><th>Type</th><th>Amount</th><th>Date</th><th>Receipt</th></tr></thead>
+          <tbody>
+            ${paymentRows.map(function(p){
+              return `<tr><td>${escapeHtml(p.paymentId)}</td><td>${escapeHtml(p.resId)}</td><td>${escapeHtml(p.guestName)}</td><td>${escapeHtml(p.roomNo)}</td><td>${escapeHtml(p.paymentType)}</td><td>${formatMoney(p.amount)}</td><td>${escapeHtml(p.paymentDate || '-')}</td><td>${escapeHtml(p.receiptName || '-')}</td></tr>`;
+            }).join('') || '<tr><td colspan="8">No payment records</td></tr>'}
+          </tbody>
+        </table>
+      </body>
+    </html>
+  `;
+}
+
+function buildCleaningReportHtml(){
+  const report = getCleaningReportDataForView();
+  const rangeText = `${APP.cleaningReportRange.start || 'Beginning'} to ${APP.cleaningReportRange.end || 'Today'}`;
+  return `
+    <html>
+      <head>
+        <title>Cleaning Report</title>
+        <style>
+          @page{size:A4 landscape;margin:14mm}
+          body{font-family:Arial,sans-serif;padding:24px;color:#111}
+          h1,h2{margin:0 0 10px}
+          .muted{color:#555;margin-bottom:16px}
+          table{width:100%;border-collapse:collapse;margin-bottom:24px}
+          th,td{border:1px solid #ddd;padding:8px;text-align:left;font-size:12px}
+          th{background:#f4f4f4}
+        </style>
+      </head>
+      <body>
+        <h1>Cleaning Report</h1>
+        <div class="muted">Range: ${escapeHtml(rangeText)}${report.targetUser ? ` | User: ${escapeHtml(report.targetUser)}` : ''}</div>
+        <h2>User Summary</h2>
+        <table>
+          <thead><tr><th>User</th><th>Room Sessions</th><th>Non-Room Sessions</th><th>Total Minutes</th></tr></thead>
+          <tbody>
+            ${report.summary.map(function(r){
+              return `<tr><td>${escapeHtml(r.user)}</td><td>${escapeHtml(String(r.roomSessions))}</td><td>${escapeHtml(String(r.nonRoomSessions))}</td><td>${escapeHtml(String(r.totalMinutes))}</td></tr>`;
+            }).join('') || '<tr><td colspan="4">No summary records</td></tr>'}
+          </tbody>
+        </table>
+        <h2>Cleaning Details</h2>
+        <table>
+          <thead><tr><th>User</th><th>Type</th><th>Place</th><th>Date</th><th>Duration (Mins)</th><th>Note</th></tr></thead>
+          <tbody>
+            ${report.rows.map(function(r){
+              return `<tr><td>${escapeHtml(r.user)}</td><td>${escapeHtml(r.placeType)}</td><td>${escapeHtml(r.place)}</td><td>${escapeHtml(r.startedAt || '-')}</td><td>${escapeHtml(String(r.durationMins || 0))}</td><td>${escapeHtml(r.note || '-')}</td></tr>`;
+            }).join('') || '<tr><td colspan="6">No detail records</td></tr>'}
+          </tbody>
+        </table>
+      </body>
+    </html>
+  `;
+}
+
+function openPrintWindow(html){
+  const win = window.open('', '_blank');
+  if (!win) return toast('Please allow pop-ups to print the report.', 'error');
+  win.document.open();
+  win.document.write(html);
+  win.document.close();
+  win.focus();
+  setTimeout(function(){ win.print(); }, 400);
+}
+
+function printBookingPaymentReport(){
+  openPrintWindow(buildBookingPaymentReportHtml());
+}
+
+function printCleaningReport(){
+  openPrintWindow(buildCleaningReportHtml());
+}
+
+function downloadBookingPaymentReportPdfAction(btn){
+  const payload = { startDate: APP.reportRange.start || '', endDate: APP.reportRange.end || '' };
+  setBusy(btn, true);
+  google.script.run
+    .withSuccessHandler(function(res){
+      setBusy(btn, false);
+      if (!res.ok) return toast(res.message || 'Report download failed', 'error');
+      downloadBase64File(res.fileName || 'booking-payment-report.pdf', res.mimeType || 'application/pdf', res.base64 || '');
+      toast(res.message || 'Report ready.', 'success');
+    })
+    .withFailureHandler(function(err){
+      setBusy(btn, false);
+      toast((err && err.message) || 'Report download failed', 'error');
+    })
+    .downloadBookingPaymentReportPdf(payload);
+}
+
+function downloadCleaningReportPdfAction(btn){
+  const payload = {
+    startDate: APP.cleaningReportRange.start || '',
+    endDate: APP.cleaningReportRange.end || '',
+    targetUser: APP.user && APP.user.role === 'Housekeeping' ? getCurrentCleaningReportUser() : (APP.cleaningReportUser || '')
+  };
+
+  setBusy(btn, true);
+  google.script.run
+    .withSuccessHandler(function(res){
+      setBusy(btn, false);
+      if (!res.ok) return toast(res.message || 'Report download failed', 'error');
+      downloadBase64File(res.fileName || 'cleaning-report.pdf', res.mimeType || 'application/pdf', res.base64 || '');
+      toast(res.message || 'Report ready.', 'success');
+    })
+    .withFailureHandler(function(err){
+      setBusy(btn, false);
+      toast((err && err.message) || 'Report download failed', 'error');
+    })
+    .downloadCleaningReportPdf(payload);
+}
+
+function downloadBase64File(fileName, mimeType, base64){
+  if (!base64) return toast('No file data returned.', 'error');
+  const link = document.createElement('a');
+  link.href = `data:${mimeType};base64,${base64}`;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+}
+
+function computeLateCheckoutAmount(row){
+  if (String(row.paymentStatus || '') === 'Free/PR') return 0;
+  const rate = Number(row.rate || 0);
+  const discountPct = Number(row.discountPct || 0);
+  return Math.round(rate * (1 - discountPct / 100) * 0.5);
+}
+
+function formatMoney(n){
+  return `₦${fmt(n)}`;
+}
+
+function openMaintenanceModal(){
+  showModal('New Maintenance Log', `
+    <div class="form-grid">
+      <div><label>Room</label><select id="mntRoom">${APP.rooms.map(function(r){ return `<option value="${r.roomNo}">${r.roomNo} - ${escapeHtml(r.roomType)}</option>`; }).join('')}</select></div>
+      <div><label>Status</label><select id="mntStatus"><option>Not Resolved</option><option>Resolved</option></select></div>
+      <div class="full"><label>Maintenance Note</label><textarea id="mntNote"></textarea></div>
+      <div class="full btn-row"><button class="btn btn-primary" onclick="saveMaintenance(this)">Save Log</button><button class="btn btn-dark" onclick="closeModal()">Cancel</button></div>
+    </div>
+  `);
+}
+
+function saveMaintenance(btn){
+  const payload = {
+    roomNo: document.getElementById('mntRoom').value,
+    status: document.getElementById('mntStatus').value,
+    note: document.getElementById('mntNote').value.trim()
+  };
+
+  setBusy(btn, true);
+  google.script.run
+    .withSuccessHandler(function(res){
+      setBusy(btn, false);
+      if (!res.ok) return toast(res.message || 'Save failed', 'error');
+
+      mergeAppData(res.data);
+      if (APP.activeTab === 'maintenance') renderMaintenance();
+      toast(res.message, 'success');
+      closeModal();
+    })
+    .withFailureHandler(function(err){
+      setBusy(btn, false);
+      toast((err && err.message) || 'Save failed', 'error');
+    })
+    .createMaintenanceLog(payload);
+}
+
+function openPaymentModal(resId){
+  const row = APP.reservations.find(function(r){ return r.resId === resId; });
+  if (!row) return;
+
+  showModal('Update Payment', `
+    <div class="form-grid">
+      <div><label>Reservation ID</label><input id="payResId" value="${escapeHtml(row.resId)}" readonly></div>
+      <div>
+        <label>Payment Status</label>
+        <select id="payStatus">
+          <option ${row.paymentStatus==='Unpaid'?'selected':''}>Unpaid</option>
+          <option ${row.paymentStatus==='Paid'?'selected':''}>Paid</option>
+          <option ${row.paymentStatus==='Part Paid'?'selected':''}>Part Paid</option>
+          <option ${row.paymentStatus==='Free/PR'?'selected':''}>Free/PR</option>
+        </select>
+      </div>
+      <div class="full"><label>RRR Number</label><input id="payRRR" value="${escapeHtml(row.rrrNumber || '')}"></div>
+      <div class="full btn-row"><button class="btn btn-primary" onclick="savePayment(this)">Save Payment</button><button class="btn btn-dark" onclick="closeModal()">Cancel</button></div>
+    </div>
+  `);
+}
+
+function savePayment(btn){
+  const payload = {
+    resId: document.getElementById('payResId').value,
+    paymentStatus: document.getElementById('payStatus').value,
+    rrrNumber: document.getElementById('payRRR').value.trim()
+  };
+
+  setBusy(btn, true);
+  google.script.run
+    .withSuccessHandler(function(res){
+      setBusy(btn, false);
+      if (!res.ok) return toast(res.message || 'Payment update failed', 'error');
+
+      mergeAppData(res.data);
+      rerenderReservationsOnly();
+      rerenderReportsOnly();
+      closeModal();
+      toast(res.message, 'success');
+    })
+    .withFailureHandler(function(err){
+      setBusy(btn, false);
+      toast((err && err.message) || 'Payment update failed', 'error');
+    })
+    .updatePayment(payload);
+}
+
+function saveUser(btn){
+  const payload = {
+    username: document.getElementById('newUsername').value.trim(),
+    password: document.getElementById('newPassword').value,
+    fullName: document.getElementById('newFullName').value.trim(),
+    role: document.getElementById('newRole').value
+  };
+
+  setBusy(btn, true);
+  google.script.run
+    .withSuccessHandler(function(res){
+      setBusy(btn, false);
+      if (!res.ok) return toast(res.message || 'Could not create user', 'error');
+
+      mergeAppData(res.data);
+      if (APP.activeTab === 'admin') renderAdmin();
+      toast(res.message, 'success');
+    })
+    .withFailureHandler(function(err){
+      setBusy(btn, false);
+      toast((err && err.message) || 'Could not create user', 'error');
+    })
+    .createUser(payload);
+}
+
+function actionResolveMaintenance(logId, status, btn){
+  setBusy(btn, true);
+  google.script.run
+    .withSuccessHandler(function(res){
+      setBusy(btn, false);
+      if (!res.ok) return toast(res.message || 'Maintenance update failed', 'error');
+
+      mergeAppData(res.data);
+      if (APP.activeTab === 'maintenance') renderMaintenance();
+      toast(res.message || 'Maintenance updated', 'success');
+    })
+    .withFailureHandler(function(err){
+      setBusy(btn, false);
+      toast((err && err.message) || 'Maintenance update failed', 'error');
+    })
+    .resolveMaintenanceLog(logId, status);
+}
+
+function logoutApp(){
+  google.script.run.withSuccessHandler(function(){
+    APP.user = null;
+    renderLogin();
+  }).logout();
+}
+
+function showModal(title, body){
+  const existing = document.getElementById('modalHost');
+  if (existing) existing.remove();
+
+  const host = document.createElement('div');
+  host.id = 'modalHost';
+  host.innerHTML = `
+    <div style="position:fixed;inset:0;background:rgba(0,0,0,.55);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center;padding:16px;z-index:9998">
+      <div class="panel" style="width:min(760px,100%);max-height:90vh;overflow:auto">
+        <div class="section-title"><strong>${escapeHtml(title)}</strong><button class="btn btn-dark" onclick="closeModal()">Close</button></div>
+        ${body}
+      </div>
+    </div>
+  `;
+  document.body.appendChild(host);
+}
+
+function closeModal(){
+  const m = document.getElementById('modalHost');
+  if (m) m.remove();
+}
+
+function toast(message, type){
+  const stack = document.getElementById('toastStack') || (function(){
+    const div = document.createElement('div');
+    div.id = 'toastStack';
+    div.className = 'toast-stack';
+    document.body.appendChild(div);
+    return div;
+  })();
+
+  const t = document.createElement('div');
+  t.className = `toast ${type || 'success'}`;
+  t.textContent = message;
+  stack.appendChild(t);
+  setTimeout(function(){ t.remove(); }, 3500);
+}
+
+function setBusy(btn, busy){
+  if (!btn) return;
+  if (!btn.dataset.label) btn.dataset.label = btn.textContent;
+  btn.disabled = busy;
+  btn.textContent = busy ? 'Please wait...' : btn.dataset.label;
+}
+
+function statCard(label, value){
+  return `<div class="panel stat-card"><div class="muted">${escapeHtml(label)}</div><div class="num">${escapeHtml(String(value))}</div></div>`;
+}
+
+function badge(text){
+  const cls = String(text || '').toLowerCase().replace(/\s+/g,' ');
+  return `<span class="badge ${cls}">${escapeHtml(String(text || '-'))}</span>`;
+}
+
+function labelForTab(tab){
+  const map = {
+    dashboard:'Dashboard',
+    rooms:'Rooms',
+    reservations:'Reservations',
+    housekeeping:'Housekeeping',
+    nonRoomHousekeeping:'Non-Room Housekeeping',
+    cleaningHistory:'Cleaning History',
+    bookingHistory:'Booking History',
+    paymentHistory:'Payment History',
+    reports:'Reports',
+    maintenance:'Maintenance',
+    admin:'Admin'
+  };
+  return map[tab] || tab;
+}
+
+function fmt(n){
+  return Number(n || 0).toLocaleString();
+}
+
+function escapeHtml(str){
+  return String(str == null ? '' : str)
+    .replaceAll('&','&amp;')
+    .replaceAll('<','&lt;')
+    .replaceAll('>','&gt;')
+    .replaceAll('"','&quot;')
+    .replaceAll("'","&#39;");
+}
+
+function escapeAttr(str){
+  return String(str == null ? '' : str)
+    .replaceAll('&','&amp;')
+    .replaceAll('<','&lt;')
+    .replaceAll('>','&gt;')
+    .replaceAll('"','&quot;')
+    .replaceAll("'","&#39;");
+}
+
+function escapeJs(str){
+  return String(str == null ? '' : str)
+    .replaceAll('\\','\\\\')
+    .replaceAll("'","\\'")
+    .replaceAll('"','\\"')
+    .replaceAll('\n','\\n')
+    .replaceAll('\r','');
+}
+</script>
