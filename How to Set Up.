@@ -1,0 +1,8 @@
+1. Upload the Excel File to Google Sheets.
+2. Set the Hotel Name and Tagline in the sheet, as well as room prices and rates.
+3. The Room has a group linking function for Airbnb owners called Apartment.
+4. To change Price for Apartment modify line 2 in Code.gs= const APARTMENT_FIXED_RATE = 300000;
+5. Go to Extensions and open App Script. Create the Files and Copy and paste Code.
+6. Change line 1 in code.gs to const APP_TITLE = 'Hotel Name PMS'; to Hotel Name.
+7. and Change line 4 in Scripts.html to branding: { hotelName:'Hotel Name', tagline:'Hotel Tagline', logoDataUri:'' },
+8. to add Logo, Go to https://base64.guru/converter/encode/image and upload image and add data:image/png;base64, if png or data:image/jpg;base64, for jpg
