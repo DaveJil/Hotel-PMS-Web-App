@@ -1,7 +1,7 @@
 <script>
 let APP = {
   user: null,
-  branding: { hotelName:'Hotel Name', tagline:'Hotel Tagline', logoDataUri:'' },
+  branding: { hotelName:'NDDC Clubhouse', tagline:'Redefining Luxury Living', logoDataUri:'' },
   dashboard: { totalRooms:0, occupied:0, reserved:0, dirty:0 },
   rooms: [],
   reservations: [],
@@ -16,6 +16,7 @@ let APP = {
   nonRoomCleaningHistory: [],
   users: [],
   roles: [],
+  nonRoomMaintenanceHistory: [],
   channels: [],
   activeTab: 'dashboard',
   reportRange: { start:'', end:'' },
@@ -163,6 +164,7 @@ function loadApp(){
         nonRoomCleaningHistory: res.nonRoomCleaningHistory || [],
         users: res.users || [],
         roles: res.roles || [],
+        nonRoomMaintenanceHistory: res.nonRoomMaintenanceHistory || [],
         channels: res.channels || []
       });
 
@@ -481,15 +483,42 @@ function hardRefreshApp(){
         cleaningReportUser: APP.cleaningReportUser || ''
       };
 
-      renderAppShell();
-      renderActiveTab();
-      toast('Data refreshed.', 'success');
+      refreshPaymentHistoryOnly(function(){
+        renderAppShell();
+        renderActiveTab();
+        toast('Data refreshed.', 'success');
+      });
     })
     .withFailureHandler(function(err){
       toast((err && err.message) || 'Refresh failed', 'error');
     })
     .getAppBootstrap();
 }
+
+function refreshPaymentHistoryOnly(callback){
+  google.script.run
+    .withSuccessHandler(function(res){
+      if (!res || !res.ok) {
+        toast((res && res.message) || 'Payment history refresh failed', 'error');
+        if (typeof callback === 'function') callback(false);
+        return;
+      }
+
+      APP.paymentHistory = Array.isArray(res.rows) ? res.rows : [];
+      APP.payments = APP.paymentHistory;
+
+      if (APP.activeTab === 'paymentHistory') {
+        renderPaymentHistory();
+      }
+
+      if (typeof callback === 'function') callback(true);
+    })
+    .withFailureHandler(function(err){
+      toast((err && err.message) || 'Payment history refresh failed', 'error');
+      if (typeof callback === 'function') callback(false);
+    })
+    .getLatestPaymentHistory();
+} 
 
 function openReservationModal(editResId){
   const existing = APP.reservations.find(function(r){ return r.resId === editResId; }) || null;
@@ -676,7 +705,8 @@ function renderReservations(){
                   <td>${badge(r.paymentStatus)}</td>
                   <td>
                     <div class="btn-row">
-                      ${r.status==='Reserved' ? `<button class="btn btn-outline" onclick="openReservationModal('${escapeJs(r.resId)}')">Edit</button>` : ''}
+                      ${(r.status==='Reserved' || r.status==='Checked In') ? `<button class="btn btn-outline" onclick="openReservationModal('${escapeJs(r.resId)}')">Edit</button>` : ''}
+                      ${(r.paymentStatus === 'Unpaid' || r.paymentStatus === 'Part Paid') ? `<button class="btn btn-outline" onclick="sendPaymentReminderWhatsapp('${escapeJs(r.resId)}')">Remind via WhatsApp</button>` : ''}
                       ${r.status==='Reserved' ? `<button class="btn btn-outline" onclick="actionReservation('${escapeJs(r.resId)}','Check In', this)">Check In</button>` : ''}
                       ${r.status==='Checked In' ? `<button class="btn btn-outline" onclick="checkoutReservation('${escapeJs(r.resId)}', this)">Check Out</button>` : ''}
                       ${r.status==='Checked In' ? `<button class="btn btn-outline" onclick="openExtendStayModal('${escapeJs(r.resId)}')">Extend Stay</button>` : ''}
@@ -712,6 +742,59 @@ function actionReservation(resId, action, btn){
       toast((err && err.message) || (action + ' failed'), 'error');
     })
     .processReservationAction(resId, action);
+}
+
+function normalizeWhatsappNumber(phone){
+  let p = String(phone || '').replace(/\D/g, '');
+  if (!p) return '';
+
+  if (p.startsWith('234') && p.length >= 13) return p;
+
+  if (p.startsWith('0') && p.length === 11) {
+    return '234' + p.slice(1);
+  }
+
+  if (p.length === 10 && ['7','8','9'].includes(p.charAt(0))) {
+    return '234' + p;
+  }
+
+  return p;
+}
+
+function sendPaymentReminderWhatsapp(resId){
+  const row =
+    (APP.reservations || []).find(r => r.resId === resId) ||
+    (APP.bookingHistory || []).find(r => r.resId === resId);
+
+  if (!row) {
+    toast('Reservation not found.', 'error');
+    return;
+  }
+
+  const phone = normalizeWhatsappNumber(row.phone);
+  if (!phone) {
+    toast('Guest phone number is missing.', 'error');
+    return;
+  }
+
+  const amount = Number(row.netAmount || 0).toLocaleString();
+  const rrr = row.rrrNumber ? `\nReference: ${row.rrrNumber}` : '';
+
+  const message =
+`Hello ${row.guestName || 'Guest'},
+This is a payment reminder from NDDC Clubhouse.
+
+Reservation ID: ${row.resId}
+Room: ${row.roomNo}
+Check-in: ${row.checkIn}
+Check-out: ${row.checkOut}
+Amount Due: ₦${amount}${rrr}
+
+Kindly make payment and send your receipt.
+Thank you.`;
+
+  const url = `https://wa.me/${phone}?text=${encodeURIComponent(message)}`;
+  window.open(url, '_blank');
 }
 
 function checkoutReservation(resId, btn){
@@ -1017,13 +1100,133 @@ function submitCompleteRoomCleaning(roomNo, btn){
     .finishRoomCleaning(roomNo, note);
 }
 
+function openAddAreaModal(){
+  showModal('Add New Area', `
+    <div class="form-grid">
+      <div class="full">
+        <label>Area Name</label>
+        <input id="newAreaName" placeholder="e.g. Conference Hall">
+      </div>
+      <div class="full btn-row">
+        <button class="btn btn-primary" onclick="saveNewArea(this)">Add Area</button>
+        <button class="btn btn-dark" onclick="closeModal()">Cancel</button>
+      </div>
+    </div>
+  `);
+}
+
+function saveNewArea(btn){
+  const payload = {
+    area: document.getElementById('newAreaName').value.trim()
+  };
+
+  setBusy(btn, true);
+  google.script.run
+    .withSuccessHandler(function(res){
+      setBusy(btn, false);
+      if (!res.ok) return toast(res.message || 'Could not add area', 'error');
+
+      mergeAppData(res.data);
+      closeModal();
+      rerenderNonRoomOnly();
+      toast(res.message || 'Area added successfully.', 'success');
+    })
+    .withFailureHandler(function(err){
+      setBusy(btn, false);
+      toast((err && err.message) || 'Could not add area', 'error');
+    })
+    .createNonRoomArea(payload);
+}
+
+function openNonRoomMaintenanceModal(){
+  showModal('New Non-Room Maintenance Log', `
+    <div class="form-grid">
+      <div>
+        <label>Area</label>
+        <select id="nonRoomMaintArea">
+          ${APP.nonRoomAreas.map(function(a){
+            return `<option value="${escapeAttr(a.area)}">${escapeHtml(a.area)}</option>`;
+          }).join('')}
+        </select>
+      </div>
+      <div>
+        <label>Status</label>
+        <select id="nonRoomMaintStatus">
+          <option>Not Resolved</option>
+          <option>Resolved</option>
+        </select>
+      </div>
+      <div class="full">
+        <label>Maintenance Note</label>
+        <textarea id="nonRoomMaintNote"></textarea>
+      </div>
+      <div class="full btn-row">
+        <button class="btn btn-primary" onclick="saveNonRoomMaintenance(this)">Save Log</button>
+        <button class="btn btn-dark" onclick="closeModal()">Cancel</button>
+      </div>
+    </div>
+  `);
+}
+
+function saveNonRoomMaintenance(btn){
+  const payload = {
+    area: document.getElementById('nonRoomMaintArea').value,
+    status: document.getElementById('nonRoomMaintStatus').value,
+    note: document.getElementById('nonRoomMaintNote').value.trim()
+  };
+
+  setBusy(btn, true);
+  google.script.run
+    .withSuccessHandler(function(res){
+      setBusy(btn, false);
+      if (!res.ok) return toast(res.message || 'Could not save non-room maintenance log', 'error');
+
+      mergeAppData(res.data);
+      closeModal();
+      rerenderNonRoomOnly();
+      toast(res.message || 'Non-room maintenance log created.', 'success');
+    })
+    .withFailureHandler(function(err){
+      setBusy(btn, false);
+      toast((err && err.message) || 'Could not save non-room maintenance log', 'error');
+    })
+    .createNonRoomMaintenanceLog(payload);
+}
+
+function actionResolveNonRoomMaintenance(logId, status, btn){
+  setBusy(btn, true);
+  google.script.run
+    .withSuccessHandler(function(res){
+      setBusy(btn, false);
+      if (!res.ok) return toast(res.message || 'Non-room maintenance update failed', 'error');
+
+      mergeAppData(res.data);
+      rerenderNonRoomOnly();
+      toast(res.message || 'Non-room maintenance updated', 'success');
+    })
+    .withFailureHandler(function(err){
+      setBusy(btn, false);
+      toast((err && err.message) || 'Non-room maintenance update failed', 'error');
+    })
+    .resolveNonRoomMaintenanceLog(logId, status);
+}
+
 function renderNonRoomHousekeeping(){
   const el = document.getElementById('nonRoomSection');
   if (!el) return;
 
   el.innerHTML = `
     <div class="panel">
-      <div class="section-title"><strong>Non-Room Housekeeping</strong><span class="muted">Track cleanliness of lobby, reception, restaurant and more</span></div>
+      <div class="section-title">
+        <strong>Non-Room Housekeeping</strong>
+        <span class="muted">Track cleanliness and maintenance of non-room areas</span>
+      </div>
+
+      <div class="btn-row" style="margin-bottom:16px">
+        <button class="btn btn-primary" onclick="openAddAreaModal()">Add New Area</button>
+        <button class="btn btn-outline" onclick="openNonRoomMaintenanceModal()">New Non-Room Maintenance Log</button>
+      </div>
+
       <div class="table-wrap">
         <table>
           <thead>
@@ -1094,6 +1297,42 @@ function renderNonRoomHousekeeping(){
                 </tr>
               `;
             }).join('') : `<tr><td colspan="8" class="empty">No non-room logs</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+
+      <div class="section-title" style="margin-top:20px"><strong>Non-Room Maintenance History</strong></div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Log ID</th>
+              <th>Area</th>
+              <th>Note</th>
+              <th>Date</th>
+              <th>Status</th>
+              <th>Action By</th>
+              <th>Resolve</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${APP.nonRoomMaintenanceHistory && APP.nonRoomMaintenanceHistory.length ? APP.nonRoomMaintenanceHistory.map(function(r){
+              return `
+                <tr>
+                  <td>${escapeHtml(r.logId)}</td>
+                  <td>${escapeHtml(r.area)}</td>
+                  <td>${escapeHtml(r.maintenanceNote || '-')}</td>
+                  <td>${escapeHtml(r.dateAdded || '-')}</td>
+                  <td>${badge(r.status || '-')}</td>
+                  <td>${escapeHtml(r.actionBy || '-')}</td>
+                  <td>
+                    ${String(r.status).toLowerCase() !== 'resolved'
+                      ? `<button class="btn btn-outline" onclick="actionResolveNonRoomMaintenance('${escapeJs(r.logId)}','Resolved', this)">Resolve</button>`
+                      : `<span class="subtle">Done</span>`}
+                  </td>
+                </tr>
+              `;
+            }).join('') : `<tr><td colspan="7" class="empty">No non-room maintenance logs</td></tr>`}
           </tbody>
         </table>
       </div>
@@ -1317,7 +1556,12 @@ function renderPaymentHistory(){
 
   el.innerHTML = `
     <div class="panel">
-      <div class="section-title"><strong>Payment History</strong></div>
+      <div class="section-title">
+        <strong>Payment History</strong>
+        <div class="btn-row">
+          <button class="btn btn-dark" onclick="refreshPaymentHistoryOnly()">Refresh</button>
+        </div>
+      </div>
       <div class="table-wrap">
         <table>
           <thead>
@@ -1458,6 +1702,7 @@ function renderReports(){
           <button class="btn btn-dark" onclick="clearReportRange()">Clear</button>
           <button class="btn btn-outline" onclick="printBookingPaymentReport()">Print</button>
           <button class="btn btn-primary" onclick="downloadBookingPaymentReportPdfAction(this)">Download PDF</button>
+          <button type="button" class="btn btn-primary" onclick="downloadFinancialReportAction(this)">Download Financial Report</button>
         </div>
       </div>
 
@@ -2065,14 +2310,111 @@ function downloadCleaningReportPdfAction(btn){
     .downloadCleaningReportPdf(payload);
 }
 
+function downloadFinancialReportAction(btn, event){
+  if (event) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
+  const startDate = APP.reportRange.start || '';
+  const endDate = APP.reportRange.end || '';
+
+  setBusy(btn, true);
+  google.script.run
+    .withSuccessHandler(function(res){
+      setBusy(btn, false);
+
+      if (!res || !res.ok) {
+        toast((res && res.message) || 'Financial report download failed', 'error');
+        return;
+      }
+
+      openBase64PdfInNewTab(
+        res.fileName || 'financial-report.pdf',
+        'application/pdf',
+        res.blob
+      );
+
+      toast('Financial report ready.', 'success');
+      console.log(res);
+    })
+    .withFailureHandler(function(err){
+      setBusy(btn, false);
+      toast((err && err.message) || 'Financial report download failed', 'error');
+    })
+    .downloadFinancialReport(startDate, endDate);
+}
+
+function openBase64PdfInNewTab(fileName, mimeType, base64){
+  if (!base64) {
+    toast('No file data returned.', 'error');
+    return;
+  }
+
+  try {
+    const byteChars = atob(base64);
+    const byteNumbers = new Array(byteChars.length);
+
+    for (let i = 0; i < byteChars.length; i++) {
+      byteNumbers[i] = byteChars.charCodeAt(i);
+    }
+
+    const byteArray = new Uint8Array(byteNumbers);
+    const blob = new Blob([byteArray], { type: mimeType || 'application/pdf' });
+    const blobUrl = URL.createObjectURL(blob);
+
+    const newWin = window.open(blobUrl, '_blank', 'noopener,noreferrer');
+
+    if (!newWin) {
+      const link = document.createElement('a');
+      link.href = blobUrl;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      link.download = fileName || 'financial-report.pdf';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+    }
+
+    setTimeout(function(){
+      URL.revokeObjectURL(blobUrl);
+    }, 15000);
+
+  } catch (err) {
+    toast('Could not open report.', 'error');
+  }
+}
+
 function downloadBase64File(fileName, mimeType, base64){
-  if (!base64) return toast('No file data returned.', 'error');
-  const link = document.createElement('a');
-  link.href = `data:${mimeType};base64,${base64}`;
-  link.download = fileName;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
+  if (!base64) {
+    toast('No file data returned.', 'error');
+    return;
+  }
+
+  try {
+    const byteChars = atob(base64);
+    const byteNumbers = new Array(byteChars.length);
+    for (let i = 0; i < byteChars.length; i++) {
+      byteNumbers[i] = byteChars.charCodeAt(i);
+    }
+
+    const byteArray = new Uint8Array(byteNumbers);
+    const blob = new Blob([byteArray], { type: mimeType || 'application/octet-stream' });
+    const blobUrl = URL.createObjectURL(blob);
+
+    const link = document.createElement('a');
+    link.href = blobUrl;
+    link.download = fileName || 'download';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+
+    setTimeout(function(){
+      URL.revokeObjectURL(blobUrl);
+    }, 2000);
+  } catch (err) {
+    toast('Could not download file.', 'error');
+  }
 }
 
 function computeLateCheckoutAmount(row){

@@ -1,5 +1,6 @@
-const APP_TITLE = 'Hotel Name PMS';
+const APP_TITLE = 'NDDC Clubhouse PMS';
 const APARTMENT_FIXED_RATE = 300000;
+const WEBSITE_API_KEY = '8f3d9c7a5e4b2f1d6a9c0e7b4d2f8a1c9b6e3d7f0a2c5b8e1d4f7a9c2e6b3d0f';
 
 const SHEETS = {
   setup: 'Setup',
@@ -49,11 +50,82 @@ function onOpen() {
     .addToUi();
 }
 
+function doPost(e) {
+  try {
+    let data = {};
+
+    if (e && e.postData && e.postData.contents) {
+      try {
+        data = JSON.parse(e.postData.contents || '{}');
+      } catch (jsonErr) {
+        const raw = e.parameter && e.parameter.data ? e.parameter.data : '{}';
+        data = JSON.parse(raw);
+      }
+    } else if (e && e.parameter && e.parameter.data) {
+      data = JSON.parse(e.parameter.data);
+    }
+
+    if (data.action === 'availability') {
+      return ContentService
+        .createTextOutput(JSON.stringify(
+          getWebsiteAvailability(data.checkIn, data.checkOut, data.apiKey)
+        ))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+
+    if (data.action === 'book') {
+      return ContentService
+        .createTextOutput(JSON.stringify(
+          createWebsiteReservation(data)
+        ))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+
+    if (data.action === 'paymentProof') {
+      return ContentService
+        .createTextOutput(JSON.stringify(
+          submitWebsitePaymentProof(data)
+        ))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+
+    return ContentService
+      .createTextOutput(JSON.stringify({ ok: false, message: 'Invalid action.' }))
+      .setMimeType(ContentService.MimeType.JSON);
+
+  } catch (err) {
+    return ContentService
+      .createTextOutput(JSON.stringify({ ok: false, message: err.message }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+}
+
+function normalizeDateOnly_(value) {
+  const d = new Date(value);
+  if (isNaN(d.getTime())) return null;
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate());
+}
+
 function authorizeApp() {
   ensureOperationalSheets_();
   SpreadsheetApp.getActiveSpreadsheet().getName();
   return 'authorized';
 }
+
+function getUserSessionKey_() {
+  return 'session_' + Session.getTemporaryActiveUserKey();
+}
+
+function saveUserSession_(user) {
+  const cache = CacheService.getUserCache();
+  cache.put(getUserSessionKey_(), JSON.stringify(user), 21600); // 6 hours
+}
+
+function clearUserSession_() {
+  const cache = CacheService.getUserCache();
+  cache.remove(getUserSessionKey_());
+}
+
 
 function login(username, password) {
   try {
@@ -77,7 +149,7 @@ function login(username, password) {
       status: String(found['Status'] || '')
     };
 
-    PropertiesService.getUserProperties().setProperty('CURRENT_USER', JSON.stringify(user));
+    saveUserSession_(user);
     audit_('Login', user.username, 'User logged in');
     return { ok: true, user: user };
   } catch (err) {
@@ -86,12 +158,13 @@ function login(username, password) {
 }
 
 function logout() {
-  PropertiesService.getUserProperties().deleteProperty('CURRENT_USER');
+  clearUserSession_();
   return { ok: true };
 }
 
 function getCurrentUser_() {
-  const raw = PropertiesService.getUserProperties().getProperty('CURRENT_USER');
+  const cache = CacheService.getUserCache();
+  const raw = cache.get(getUserSessionKey_());
   return raw ? JSON.parse(raw) : null;
 }
 
@@ -122,6 +195,7 @@ function getAppBootstrap() {
       nonRoomAreas: getNonRoomAreas_(),
       nonRoomHousekeepingHistory: getNonRoomHousekeepingHistory_(),
       nonRoomCleaningHistory: getNonRoomCleaningHistory_(),
+      nonRoomMaintenanceHistory: getNonRoomMaintenanceHistory_(),
       users: getUsers_(),
       roles: getActiveRoles_(),
       channels: getChannels_()
@@ -143,6 +217,7 @@ function getAppBootstrap() {
       nonRoomAreas: [],
       nonRoomHousekeepingHistory: [],
       nonRoomCleaningHistory: [],
+      nonRoomMaintenanceHistory: [],
       users: [],
       roles: [],
       channels: []
@@ -163,6 +238,195 @@ function getBranding_() {
     tagline: map['Tagline'] || 'Redefining Luxury Living',
     logoDataUri: map['Logo Data Uri'] || ''
   };
+}
+
+function isAuthorizedWebsiteRequest_(apiKey) {
+  return String(apiKey || '').trim() === String(WEBSITE_API_KEY || '').trim();
+}
+
+function sanitizeDataUri_(dataUri) {
+  const raw = String(dataUri || '').trim();
+  if (!raw) return '';
+  if (!/^data:(image\/[a-zA-Z0-9.+-]+|application\/pdf);base64,/.test(raw)) {
+    throw new Error('Invalid receipt format. Only images or PDF are allowed.');
+  }
+  return raw;
+}
+
+function uploadReceiptDataUriToDrive_(dataUri, fileName) {
+  const clean = sanitizeDataUri_(dataUri);
+  const match = clean.match(/^data:([^;]+);base64,(.+)$/);
+  if (!match) throw new Error('Invalid receipt data.');
+
+  const mimeType = match[1];
+  const base64 = match[2];
+  const bytes = Utilities.base64Decode(base64);
+  const blob = Utilities.newBlob(bytes, mimeType, fileName || 'receipt');
+  const file = DriveApp.createFile(blob);
+
+  return {
+    url: file.getUrl(),
+    name: file.getName(),
+    fileId: file.getId()
+  };
+}
+
+function getWebsiteAvailability(checkIn, checkOut, apiKey) {
+  try {
+    if (!isAuthorizedWebsiteRequest_(apiKey)) {
+      throw new Error('Unauthorized request.');
+    }
+
+    if (!checkIn || !checkOut) {
+      throw new Error('Check-in and check-out dates are required.');
+    }
+
+    const cache = createRequestCache_();
+    const rooms = getRoomsDataCached_(cache);
+
+    const apartmentGroups = [...new Set(
+      rooms.map(function(r){ return String(r.apartmentGroup || ''); }).filter(Boolean)
+    )];
+
+    const units = [];
+
+    apartmentGroups.forEach(function(group) {
+      if (isUnitAvailable_(group, checkIn, checkOut, cache)) {
+        units.push({
+          unitType: 'Apartment',
+          unitNo: group,
+          roomType: 'Apartment',
+          rate: APARTMENT_FIXED_RATE
+        });
+      }
+    });
+
+    rooms.forEach(function(room) {
+      if (isUnitAvailable_(room.roomNo, checkIn, checkOut, cache)) {
+        units.push({
+          unitType: 'Room',
+          unitNo: room.roomNo,
+          roomType: room.roomType,
+          rate: Number(room.rate || 0)
+        });
+      }
+    });
+
+    return { ok: true, units: units };
+  } catch (err) {
+    return { ok: false, message: err.message };
+  }
+}
+
+function createWebsiteReservation(payload) {
+  try {
+    if (!isAuthorizedWebsiteRequest_(payload.apiKey)) {
+      throw new Error('Unauthorized request.');
+    }
+
+    const cache = createRequestCache_();
+    validateReservation_(payload);
+
+    if (!isUnitAvailable_(payload.roomNo, payload.checkIn, payload.checkOut, cache)) {
+      throw new Error('Selected room or apartment is not available for those dates.');
+    }
+
+    const rooms = getRoomsDataCached_(cache);
+    const selectedRoom = rooms.find(function(r){ return String(r.roomNo) === String(payload.roomNo); });
+    const apartmentRooms = rooms.filter(function(r){ return String(r.apartmentGroup || '') === String(payload.roomNo); });
+    const isApartmentBooking = apartmentRooms.length > 0;
+
+    const primaryRoom = isApartmentBooking ? apartmentRooms[0] : selectedRoom;
+    if (!primaryRoom) throw new Error('Room not found.');
+
+    const paymentStatus = payload.paymentStatus || 'Unpaid';
+    const baseRate = isApartmentBooking ? APARTMENT_FIXED_RATE : Number(primaryRoom.rate || 0);
+    const rate = isFreePrStatus_(paymentStatus) ? 0 : baseRate;
+    const nights = nightsBetween_(payload.checkIn, payload.checkOut);
+    const netAmount = isFreePrStatus_(paymentStatus)
+      ? 0
+      : Math.round((rate * nights) * (1 - Number(payload.discountPct || 0) / 100));
+
+    const sh = getSheet_(SHEETS.reservations);
+    const resId = makeId_('RES', sh);
+
+    sh.appendRow([
+      resId,
+      payload.guestName,
+      payload.phone || '',
+      payload.email || '',
+      payload.roomNo,
+      isApartmentBooking ? ('Apartment - ' + payload.roomNo) : (primaryRoom.roomType || ''),
+      new Date(payload.checkIn),
+      new Date(payload.checkOut),
+      nights,
+      Number(payload.adults || 1),
+      rate,
+      Number(payload.discountPct || 0),
+      netAmount,
+      payload.channel || 'Website',
+      'Reserved',
+      paymentStatus,
+      payload.rrrNumber || '',
+      'Website Booking',
+      payload.notes || '',
+      new Date()
+    ]);
+
+    const hist = getSheet_(SHEETS.bookingHistory);
+    hist.appendRow([
+      resId,
+      payload.guestName,
+      payload.phone || '',
+      payload.email || '',
+      payload.roomNo,
+      isApartmentBooking ? ('Apartment - ' + payload.roomNo) : (primaryRoom.roomType || ''),
+      new Date(payload.checkIn),
+      new Date(payload.checkOut),
+      '',
+      nights,
+      Number(payload.adults || 1),
+      rate,
+      Number(payload.discountPct || 0),
+      Number(payload.discountPct || 0) > 0 ? 'Yes' : 'No',
+      netAmount,
+      payload.channel || 'Website',
+      'Reserved',
+      paymentStatus,
+      payload.rrrNumber || '',
+      'No',
+      0,
+      '',
+      '',
+      'Website Booking',
+      payload.notes || '',
+      new Date(),
+      new Date()
+    ]);
+
+    if (String(payload.email || '').trim()) {
+      try {
+        sendReservationConfirmationEmail_({
+          resId: resId,
+          guestName: payload.guestName,
+          email: payload.email,
+          roomNo: payload.roomNo,
+          roomType: isApartmentBooking ? ('Apartment - ' + payload.roomNo) : (primaryRoom.roomType || ''),
+          checkIn: formatDate_(payload.checkIn),
+          checkOut: formatDate_(payload.checkOut),
+          nights: nights,
+          adults: Number(payload.adults || 1),
+          netAmount: netAmount,
+          channel: payload.channel || 'Website'
+        });
+      } catch (mailErr) {}
+    }
+
+    audit_('Website Booking', 'website', resId + ' created from website');
+    return { ok: true, resId: resId, message: 'Booking created successfully.' };
+  } catch (err) {
+    return { ok: false, message: err.message };
+  }
 }
 
 function getDashboard_() {
@@ -326,6 +590,22 @@ function getPaymentHistory_() {
     receipt: String(r['Receipt'] || ''),
     receiptName: String(r['Receipt Name'] || '')
   }));
+}
+
+function getLatestPaymentHistory() {
+  try {
+    requireUser_();
+    return {
+      ok: true,
+      rows: getPaymentHistory_()
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      message: err.message,
+      rows: []
+    };
+  }
 }
 
 function getNonRoomAreas_() {
@@ -575,6 +855,10 @@ function ensureOperationalSheets_() {
     'Finished At', 'Finished By', 'Duration (Mins)', 'Cleaning Note', 'Action By'
   ]);
 
+  ensureSheet_('Non-Room Maintenance History', [
+    'Log ID', 'Area', 'Maintenance Note', 'Date Added', 'Status', 'Action By', 'Resolved At', 'Resolved By'
+  ]);
+
   ensureSheet_('Audit Log', ['Time', 'Action', 'Username', 'Details']);
 
   resetNonRoomAreasDaily_();
@@ -692,6 +976,86 @@ function checkMailAuthorization() {
   } catch (err) {
     return { ok: false, message: err.message };
   }
+}
+
+function getInlineLogoForEmail_() {
+  try {
+    const branding = getBranding_();
+    const dataUri = String(branding.logoDataUri || '').trim();
+    if (!dataUri || dataUri.indexOf('data:image/') !== 0) return null;
+
+    const match = dataUri.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
+    if (!match) return null;
+
+    const mimeType = match[1];
+    const base64 = match[2];
+    const bytes = Utilities.base64Decode(base64);
+    return Utilities.newBlob(bytes, mimeType, 'logo');
+  } catch (err) {
+    return null;
+  }
+}
+
+function buildReservationEmailHeaderHtml_(titleText) {
+  const branding = getBranding_();
+  const logoBlob = getInlineLogoForEmail_();
+  const logoHtml = logoBlob ? `<img src="cid:hotelLogo" alt="Logo" style="max-height:56px;display:block;margin-bottom:10px">` : '';
+
+  return {
+    inlineImages: logoBlob ? { hotelLogo: logoBlob } : {},
+    headerHtml: `
+      <div style="background:#111827;color:#fff;padding:20px 24px">
+        ${logoHtml}
+        <h2 style="margin:0;font-size:22px">${escapeHtmlServer_(branding.hotelName || 'NDDC Clubhouse')}</h2>
+        <div style="opacity:.9;margin-top:6px">${escapeHtmlServer_(titleText || '')}</div>
+      </div>
+    `
+  };
+}
+
+function sendReservationUpdateEmail_(reservation) {
+  const email = String(reservation.email || '').trim();
+  if (!email) return { ok: true, skipped: true };
+  if (!isValidEmail_(email)) return { ok: false, message: 'Invalid guest email address.' };
+
+  const mailBits = buildReservationEmailHeaderHtml_('Reservation Updated');
+  const subject = 'Reservation Updated - ' + (reservation.resId || 'NDDC Clubhouse');
+
+  const htmlBody = `
+    <div style="font-family:Arial,sans-serif;color:#111;line-height:1.5">
+      <div style="max-width:680px;margin:0 auto;border:1px solid #e5e7eb;border-radius:14px;overflow:hidden">
+        ${mailBits.headerHtml}
+        <div style="padding:24px">
+          <p>Dear ${escapeHtmlServer_(reservation.guestName || 'Guest')},</p>
+          <p>Your reservation details have been updated. Here are the latest details:</p>
+
+          <table style="width:100%;border-collapse:collapse;margin:18px 0">
+            <tr><td style="padding:8px;border:1px solid #e5e7eb"><strong>Reservation ID</strong></td><td style="padding:8px;border:1px solid #e5e7eb">${escapeHtmlServer_(reservation.resId || '')}</td></tr>
+            <tr><td style="padding:8px;border:1px solid #e5e7eb"><strong>Guest Name</strong></td><td style="padding:8px;border:1px solid #e5e7eb">${escapeHtmlServer_(reservation.guestName || '')}</td></tr>
+            <tr><td style="padding:8px;border:1px solid #e5e7eb"><strong>Room</strong></td><td style="padding:8px;border:1px solid #e5e7eb">${escapeHtmlServer_(reservation.roomNo || '')}</td></tr>
+            <tr><td style="padding:8px;border:1px solid #e5e7eb"><strong>Room Type</strong></td><td style="padding:8px;border:1px solid #e5e7eb">${escapeHtmlServer_(reservation.roomType || '')}</td></tr>
+            <tr><td style="padding:8px;border:1px solid #e5e7eb"><strong>Check In</strong></td><td style="padding:8px;border:1px solid #e5e7eb">${escapeHtmlServer_(reservation.checkIn || '')}</td></tr>
+            <tr><td style="padding:8px;border:1px solid #e5e7eb"><strong>Check Out</strong></td><td style="padding:8px;border:1px solid #e5e7eb">${escapeHtmlServer_(reservation.checkOut || '')}</td></tr>
+            <tr><td style="padding:8px;border:1px solid #e5e7eb"><strong>Nights</strong></td><td style="padding:8px;border:1px solid #e5e7eb">${escapeHtmlServer_(String(reservation.nights || 0))}</td></tr>
+            <tr><td style="padding:8px;border:1px solid #e5e7eb"><strong>Adults</strong></td><td style="padding:8px;border:1px solid #e5e7eb">${escapeHtmlServer_(String(reservation.adults || 1))}</td></tr>
+            <tr><td style="padding:8px;border:1px solid #e5e7eb"><strong>Amount</strong></td><td style="padding:8px;border:1px solid #e5e7eb">${escapeHtmlServer_(formatCurrency_(reservation.netAmount || 0))}</td></tr>
+            <tr><td style="padding:8px;border:1px solid #e5e7eb"><strong>Channel</strong></td><td style="padding:8px;border:1px solid #e5e7eb">${escapeHtmlServer_(reservation.channel || '')}</td></tr>
+          </table>
+
+          <p>Thank you for choosing NDDC Clubhouse.</p>
+        </div>
+      </div>
+    </div>
+  `;
+
+  MailApp.sendEmail({
+    to: email,
+    subject: subject,
+    htmlBody: htmlBody,
+    inlineImages: mailBits.inlineImages
+  });
+
+  return { ok: true };
 }
 
 function formatDate_(value) {
@@ -827,66 +1191,138 @@ function updateLinkedRoomStatuses_(unitNo, updates, rooms) {
 }
 
 function isUnitAvailable_(unitNo, checkIn, checkOut, cache) {
-  const rooms = getRoomsDataCached_(cache);
-  const linked = getLinkedRoomNos_(unitNo, rooms);
+  return !hasReservationConflict_(unitNo, checkIn, checkOut, cache);
+}
 
-  for (var i = 0; i < linked.length; i++) {
-    const room = rooms.find(r => String(r.roomNo) === String(linked[i]));
-    if (!room) return false;
-    if (String(room.status).toLowerCase() === 'occupied') return false;
-  }
-
-  if (hasReservationConflict_(unitNo, checkIn, checkOut, cache)) return false;
-  return true;
+function getReservationsDataCached_(cache) {
+  if (cache && cache.reservations) return cache.reservations;
+  const data = getReservations_();
+  if (cache) cache.reservations = data;
+  return data;
 }
 
 function hasReservationConflict_(unitNo, checkIn, checkOut, cache) {
-  const rows = getReservationSheetRowsCached_(cache);
+  const reservations = getReservationsDataCached_(cache);
   const rooms = getRoomsDataCached_(cache);
-  const start = new Date(checkIn);
-  const end = new Date(checkOut);
-  const linked = getLinkedRoomNos_(unitNo, rooms);
 
-  return rows.some(r => {
-    const status = String(r['Status'] || '');
-    if (status === 'Checked Out' || status === 'Cancelled') return false;
+  const reqCheckIn = normalizeDateOnly_(checkIn);
+  const reqCheckOut = normalizeDateOnly_(checkOut);
 
-    const bookedUnit = String(r['Room No'] || '');
-    const bookedLinked = getLinkedRoomNos_(bookedUnit, rooms);
+  if (!reqCheckIn || !reqCheckOut) {
+    throw new Error('Invalid reservation dates.');
+  }
 
-    const overlapsInventory =
-      bookedUnit === String(unitNo) ||
-      linked.indexOf(bookedUnit) > -1 ||
-      bookedLinked.some(x => linked.indexOf(x) > -1);
+  // if unitNo is an apartment group, block if any room in that apartment is booked
+  const apartmentRooms = rooms
+    .filter(function(r) {
+      return String(r.apartmentGroup || '') === String(unitNo);
+    })
+    .map(function(r) {
+      return String(r.roomNo);
+    });
 
-    if (!overlapsInventory) return false;
-    return datesOverlap_(start, end, new Date(r['Check In']), new Date(r['Check Out']));
+  const isApartmentBooking = apartmentRooms.length > 0;
+
+  return reservations.some(function(r) {
+    const status = String(r.status || r['Status'] || '').trim();
+
+    // only active bookings should block
+    if (status !== 'Reserved' && status !== 'Checked In') return false;
+
+    const existingCheckIn = normalizeDateOnly_(r.checkIn || r['Check In']);
+    const existingCheckOut = normalizeDateOnly_(r.checkOut || r['Check Out']);
+    if (!existingCheckIn || !existingCheckOut) return false;
+
+    // overlap rule:
+    // new check-in < existing check-out AND new check-out > existing check-in
+    const overlaps = reqCheckIn < existingCheckOut && reqCheckOut > existingCheckIn;
+    if (!overlaps) return false;
+
+    const reservedUnit = String(r.roomNo || r['Room No'] || '');
+
+    // apartment booking: any room in that apartment blocks it
+    if (isApartmentBooking) {
+      if (apartmentRooms.indexOf(reservedUnit) > -1) return true;
+
+      // also block if an old reservation row itself stored apartment group name
+      if (reservedUnit === String(unitNo)) return true;
+
+      return false;
+    }
+
+    // single room booking:
+    // direct same room conflict
+    if (reservedUnit === String(unitNo)) return true;
+
+    // if selected room belongs to an apartment group and the apartment itself was booked, block it
+    const selectedRoom = rooms.find(function(x) {
+      return String(x.roomNo) === String(unitNo);
+    });
+
+    if (selectedRoom && selectedRoom.apartmentGroup) {
+      if (reservedUnit === String(selectedRoom.apartmentGroup)) return true;
+    }
+
+    return false;
   });
 }
 
 function hasReservationConflictExcluding_(unitNo, checkIn, checkOut, excludeResId, cache) {
-  const rows = getReservationSheetRowsCached_(cache);
   const rooms = getRoomsDataCached_(cache);
-  const start = new Date(checkIn);
-  const end = new Date(checkOut);
-  const linked = getLinkedRoomNos_(unitNo, rooms);
 
-  return rows.some(r => {
-    if (String(r['Res ID']) === String(excludeResId)) return false;
+  const sh = getSheet_(SHEETS.reservations, false);
+  const rows = sh ? getObjects_(sh) : [];
 
-    const status = String(r['Status'] || '');
-    if (status === 'Checked Out' || status === 'Cancelled') return false;
+  const reqCheckIn = normalizeDateOnly_(checkIn);
+  const reqCheckOut = normalizeDateOnly_(checkOut);
 
-    const bookedUnit = String(r['Room No'] || '');
-    const bookedLinked = getLinkedRoomNos_(bookedUnit, rooms);
+  if (!reqCheckIn || !reqCheckOut) {
+    throw new Error('Invalid reservation dates.');
+  }
 
-    const overlapsInventory =
-      bookedUnit === String(unitNo) ||
-      linked.indexOf(bookedUnit) > -1 ||
-      bookedLinked.some(x => linked.indexOf(x) > -1);
+  const apartmentRooms = rooms
+    .filter(function(r) {
+      return String(r.apartmentGroup || '') === String(unitNo);
+    })
+    .map(function(r) {
+      return String(r.roomNo);
+    });
 
-    if (!overlapsInventory) return false;
-    return datesOverlap_(start, end, new Date(r['Check In']), new Date(r['Check Out']));
+  const isApartmentBooking = apartmentRooms.length > 0;
+
+  return rows.some(function(r) {
+    const resId = String(r['Res ID'] || '').trim();
+    if (resId === String(excludeResId || '').trim()) return false;
+
+    const status = String(r['Status'] || '').trim();
+    if (status !== 'Reserved' && status !== 'Checked In') return false;
+
+    const existingCheckIn = normalizeDateOnly_(r['Check In']);
+    const existingCheckOut = normalizeDateOnly_(r['Check Out']);
+    if (!existingCheckIn || !existingCheckOut) return false;
+
+    const overlaps = reqCheckIn < existingCheckOut && reqCheckOut > existingCheckIn;
+    if (!overlaps) return false;
+
+    const reservedUnit = String(r['Room No'] || '').trim();
+
+    if (isApartmentBooking) {
+      if (apartmentRooms.indexOf(reservedUnit) > -1) return true;
+      if (reservedUnit === String(unitNo).trim()) return true;
+      return false;
+    }
+
+    if (reservedUnit === String(unitNo).trim()) return true;
+
+    const selectedRoom = rooms.find(function(x) {
+      return String(x.roomNo) === String(unitNo).trim();
+    });
+
+    if (selectedRoom && selectedRoom.apartmentGroup) {
+      if (reservedUnit === String(selectedRoom.apartmentGroup).trim()) return true;
+    }
+
+    return false;
   });
 }
 
@@ -950,14 +1386,12 @@ function sendReservationConfirmationEmail_(reservation) {
   if (!email) return { ok: true, skipped: true };
   if (!isValidEmail_(email)) return { ok: false, message: 'Invalid guest email address.' };
 
+  const mailBits = buildReservationEmailHeaderHtml_('Reservation Confirmation');
   const subject = 'Reservation Confirmation - ' + (reservation.resId || 'NDDC Clubhouse');
   const htmlBody = `
     <div style="font-family:Arial,sans-serif;color:#111;line-height:1.5">
       <div style="max-width:680px;margin:0 auto;border:1px solid #e5e7eb;border-radius:14px;overflow:hidden">
-        <div style="background:#111827;color:#fff;padding:20px 24px">
-          <h2 style="margin:0;font-size:22px">NDDC Clubhouse</h2>
-          <div style="opacity:.9;margin-top:6px">Reservation Confirmation</div>
-        </div>
+        ${mailBits.headerHtml}
         <div style="padding:24px">
           <p>Dear ${escapeHtmlServer_(reservation.guestName || 'Guest')},</p>
           <p>Your reservation has been confirmed. Here are your booking details:</p>
@@ -981,13 +1415,17 @@ function sendReservationConfirmationEmail_(reservation) {
     </div>
   `;
 
-  MailApp.sendEmail({
-    to: email,
-    subject: subject,
-    htmlBody: htmlBody
-  });
-
-  return { ok: true };
+  try {
+    MailApp.sendEmail({
+      to: email,
+      subject: subject,
+      htmlBody: htmlBody,
+      inlineImages: mailBits.inlineImages
+    });
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, message: err.message };
+  }
 }
 
 function escapeHtmlServer_(str) {
@@ -1124,7 +1562,9 @@ function updateReservation(resId, payload) {
     if (idx === -1) throw new Error('Reservation not found.');
 
     const current = rows[idx];
-    if (String(current['Status']) !== 'Reserved') throw new Error('Only reserved bookings can be edited.');
+    if (String(current['Status']) !== 'Reserved' && String(current['Status']) !== 'Checked In') {
+      throw new Error('Only reserved or checked-in bookings can be edited.');
+    }
 
     if (hasReservationConflictExcluding_(payload.roomNo, payload.checkIn, payload.checkOut, resId, cache)) {
       throw new Error('Selected room or apartment is not available for those dates.');
@@ -1190,6 +1630,24 @@ function updateReservation(resId, payload) {
         setCellByHeader_(hist, hRowNumber, hHeaders, 'Notes', payload.notes || '');
         setCellByHeader_(hist, hRowNumber, hHeaders, 'Updated At', new Date());
       }
+    }
+
+    if (String(payload.email || current['Email'] || '').trim()) {
+      try {
+        sendReservationUpdateEmail_({
+          resId: resId,
+          guestName: payload.guestName,
+          email: payload.email || current['Email'] || '',
+          roomNo: payload.roomNo,
+          roomType: isApartmentBooking ? ('Apartment - ' + payload.roomNo) : (primaryRoom.roomType || ''),
+          checkIn: formatDate_(payload.checkIn),
+          checkOut: formatDate_(payload.checkOut),
+          nights: nights,
+          adults: Number(payload.adults || 1),
+          netAmount: netAmount,
+          channel: payload.channel || 'Walk-in'
+        });
+      } catch (mailErr) {}
     }
 
     audit_('Update Reservation', user.username, resId + ' updated');
@@ -1878,6 +2336,110 @@ function updateNonRoomHousekeeping(area, status, note) {
   }
 }
 
+function createNonRoomArea(payload) {
+  try {
+    const user = requireUser_();
+    if (!payload || !String(payload.area || '').trim()) {
+      throw new Error('Area name is required.');
+    }
+
+    const area = String(payload.area || '').trim();
+    const sh = getSheet_(SHEETS.nonRoomAreas);
+    const rows = getObjects_(sh);
+
+    const exists = rows.some(function(r) {
+      return String(r['Area'] || '').trim().toLowerCase() === area.toLowerCase();
+    });
+    if (exists) throw new Error('Area already exists.');
+
+    sh.appendRow([
+      area,
+      'Dirty',
+      '',
+      ''
+    ]);
+
+    audit_('Create Non-Room Area', user.username, area + ' added');
+    return { ok: true, message: 'New area added successfully.', data: getAppBootstrap() };
+  } catch (err) {
+    return { ok: false, message: err.message };
+  }
+}
+
+function getNonRoomMaintenanceHistory_() {
+  const sh = getSheet_('Non-Room Maintenance History', false);
+  if (!sh) return [];
+  return getObjects_(sh).map(function(r) {
+    return {
+      logId: String(r['Log ID'] || ''),
+      area: String(r['Area'] || ''),
+      maintenanceNote: String(r['Maintenance Note'] || ''),
+      dateAdded: formatDateTime_(r['Date Added']),
+      status: String(r['Status'] || ''),
+      actionBy: String(r['Action By'] || '')
+    };
+  });
+}
+
+function createNonRoomMaintenanceLog(payload) {
+  try {
+    const user = requireUser_();
+    const area = String(payload.area || '').trim();
+    const note = String(payload.note || '').trim();
+    const status = String(payload.status || 'Not Resolved').trim();
+
+    if (!area) throw new Error('Area is required.');
+    if (!note) throw new Error('Maintenance note is required.');
+
+    const areaSheet = getSheet_(SHEETS.nonRoomAreas);
+    const areaRows = getObjects_(areaSheet);
+    const exists = areaRows.some(function(r) {
+      return String(r['Area'] || '').trim() === area;
+    });
+    if (!exists) throw new Error('Area not found.');
+
+    const sh = getSheet_('Non-Room Maintenance History');
+    sh.appendRow([
+      makeId_('NRM', sh),
+      area,
+      note,
+      new Date(),
+      status,
+      user.fullName || user.username,
+      '',
+      ''
+    ]);
+
+    audit_('Create Non-Room Maintenance Log', user.username, area + ' maintenance logged');
+    return { ok: true, message: 'Non-room maintenance log created.', data: getAppBootstrap() };
+  } catch (err) {
+    return { ok: false, message: err.message };
+  }
+}
+
+function resolveNonRoomMaintenanceLog(logId, status) {
+  try {
+    const user = requireUser_();
+    const sh = getSheet_('Non-Room Maintenance History');
+    const headers = getHeaders_(sh);
+    const rows = getObjects_(sh);
+    const idx = rows.findIndex(function(r) {
+      return String(r['Log ID'] || '') === String(logId);
+    });
+    if (idx === -1) throw new Error('Non-room maintenance log not found.');
+
+    const rowNumber = idx + 2;
+    setCellByHeader_(sh, rowNumber, headers, 'Status', status);
+    setCellByHeader_(sh, rowNumber, headers, 'Resolved At', new Date());
+    setCellByHeader_(sh, rowNumber, headers, 'Resolved By', user.fullName || user.username);
+
+    audit_('Resolve Non-Room Maintenance Log', user.username, logId + ' -> ' + status);
+    return { ok: true, message: 'Non-room maintenance updated.', data: getAppBootstrap() };
+  } catch (err) {
+    return { ok: false, message: err.message };
+  }
+}
+
 function getCheckoutReceiptData(resId) {
   try {
     requireUser_();
@@ -1990,6 +2552,129 @@ function buildCheckoutReceiptHtml_(data) {
       </div>
     </div>
   `;
+}
+
+function submitWebsitePaymentProof(payload) {
+  try {
+    if (!isAuthorizedWebsiteRequest_(payload.apiKey)) {
+      throw new Error('Unauthorized request.');
+    }
+
+    const resId = String(payload.resId || '').trim();
+    const email = String(payload.email || '').trim().toLowerCase();
+    const amount = Number(payload.amount || 0);
+    const rrrNumber = String(payload.rrrNumber || '').trim();
+    const note = String(payload.note || '').trim();
+    const receiptName = String(payload.receiptName || 'receipt');
+    const receiptDataUri = String(payload.receiptDataUri || '').trim();
+
+    if (!resId) throw new Error('Reservation ID is required.');
+    if (!email) throw new Error('Email is required.');
+    if (!amount || amount <= 0) throw new Error('Valid payment amount is required.');
+    if (!rrrNumber) throw new Error('Reference number is required.');
+    if (!receiptDataUri) throw new Error('Receipt upload is required.');
+
+    const resSheet = getSheet_(SHEETS.reservations);
+    const resHeaders = getHeaders_(resSheet);
+    const resRows = getObjects_(resSheet);
+    const resIdx = resRows.findIndex(function(r) {
+      return String(r['Res ID'] || '').trim() === resId &&
+             String(r['Email'] || '').trim().toLowerCase() === email;
+    });
+
+    if (resIdx === -1) throw new Error('Reservation not found for that Reservation ID and email.');
+
+    const row = resRows[resIdx];
+    const rowNumber = resIdx + 2;
+    const uploaded = uploadReceiptDataUriToDrive_(receiptDataUri, receiptName);
+
+    const currentNetAmount = Number(row['Net Amount'] || 0);
+    const newPaymentStatus = amount >= currentNetAmount ? 'Paid' : 'Part Paid';
+
+    setCellByHeader_(resSheet, rowNumber, resHeaders, 'Payment Status', newPaymentStatus);
+    setCellByHeader_(resSheet, rowNumber, resHeaders, 'RRR Number', rrrNumber);
+
+    updateBookingHistoryStatus_(resId, {
+      paymentStatus: newPaymentStatus,
+      rrrNumber: rrrNumber,
+      extraNote: appendNote_(row['Notes'], 'Website payment proof submitted')
+    });
+
+    const paySheet = getSheet_(SHEETS.paymentHistory);
+    paySheet.appendRow([
+      makeId_('PAY', paySheet),
+      resId,
+      String(row['Guest Name'] || ''),
+      String(row['Room No'] || ''),
+      'Reservation Payment',
+      amount,
+      rrrNumber,
+      new Date(),
+      'Website Payment Proof',
+      note || newPaymentStatus,
+      uploaded.url,
+      uploaded.name
+    ]);
+
+    audit_('Website Payment Proof', 'website', resId + ' payment proof uploaded');
+    return {
+      ok: true,
+      message: 'Payment proof submitted successfully.',
+      paymentStatus: newPaymentStatus,
+      receiptUrl: uploaded.url
+    };
+  } catch (err) {
+    return { ok: false, message: err.message };
+  }
+}
+
+function syncMissingPaymentsToHistory() {
+  const resSheet = getSheet_(SHEETS.reservations);
+  const paySheet = getSheet_(SHEETS.paymentHistory);
+
+  const resHeaders = getHeaders_(resSheet);
+  const resRows = getObjects_(resSheet);
+
+  const payRows = getObjects_(paySheet);
+  const existing = new Set(
+    payRows.map(r => String(r['Res ID'] || '') + '_' + String(r['RRR Number'] || ''))
+  );
+
+  let added = 0;
+
+  resRows.forEach(function(r) {
+    const resId = String(r['Res ID'] || '');
+    const paymentStatus = String(r['Payment Status'] || '');
+    const rrr = String(r['RRR Number'] || '');
+
+    if (!resId || !rrr) return;
+
+    if (paymentStatus !== 'Paid' && paymentStatus !== 'Part Paid') return;
+
+    const key = resId + '_' + rrr;
+    if (existing.has(key)) return;
+
+    const amount = Number(r['Net Amount'] || 0);
+
+    paySheet.appendRow([
+      makeId_('PAY', paySheet),
+      resId,
+      r['Guest Name'] || '',
+      r['Room No'] || '',
+      'Reservation Payment',
+      amount,
+      rrr,
+      new Date(),
+      'Auto Sync',
+      paymentStatus,
+      '',
+      ''
+    ]);
+
+    added++;
+  });
+
+  return { ok: true, added: added };
 }
 
 function buildPdfResponse_(title, subtitle, tables, fileStem, options) {
@@ -2188,6 +2873,368 @@ function getBookingPaymentReportData_(payload) {
   return { bookings: bookings, payments: payments };
 }
 
+function getFinancialReportData_(payload) {
+  const bookings = filterRowsByDateRangeServer_(
+    getBookingHistory_(),
+    payload.startDate,
+    payload.endDate,
+    ['createdAt', 'checkIn', 'updatedAt', 'actualCheckout']
+  ).filter(function(r) {
+    return String(r.paymentStatus || '').trim() !== 'Free/PR' && Number(r.netAmount || 0) > 0;
+  });
+
+  const payments = filterRowsByDateRangeServer_(
+    getPaymentHistory_(),
+    payload.startDate,
+    payload.endDate,
+    ['paymentDate']
+  ).filter(function(r) {
+    const type = String(r.paymentType || '').trim().toLowerCase();
+    const note = String(r.note || '').trim().toLowerCase();
+    return type !== 'free/pr' && note.indexOf('free/pr') === -1 && Number(r.amount || 0) > 0;
+  });
+
+  const bookingTotal = bookings.reduce(function(sum, r) {
+    return sum + Number(r.netAmount || 0);
+  }, 0);
+
+  const paymentTotal = payments.reduce(function(sum, r) {
+    return sum + Number(r.amount || 0);
+  }, 0);
+
+  const totalReserved = bookings.filter(function(r) {
+    return String(r.status || '').trim() === 'Reserved';
+  }).length;
+
+  const totalCancelled = bookings.filter(function(r) {
+    return String(r.status || '').trim() === 'Cancelled';
+  }).length;
+
+  const totalCheckedIn = bookings.filter(function(r) {
+    return String(r.status || '').trim() === 'Checked In';
+  }).length;
+
+  const totalCheckedOut = bookings.filter(function(r) {
+    return String(r.status || '').trim() === 'Checked Out';
+  }).length;
+
+  return {
+    bookings: bookings,
+    payments: payments,
+    bookingTotal: bookingTotal,
+    paymentTotal: paymentTotal,
+    totalReserved: totalReserved,
+    totalCancelled: totalCancelled,
+    totalCheckedIn: totalCheckedIn,
+    totalCheckedOut: totalCheckedOut
+  };
+}
+
+// function downloadFinancialReport(startDate, endDate) {
+//   try {
+//     ensureOperationalSheets_();
+
+//     const start = startDate ? new Date(startDate) : null;
+//     const end = endDate ? new Date(endDate) : null;
+
+//     const bookingSheet = getSheet_(SHEETS.bookingHistory);
+//     const paymentSheet = getSheet_(SHEETS.paymentHistory);
+
+//     const bookings = getObjects_(bookingSheet);
+//     const payments = getObjects_(paymentSheet);
+
+//     const filteredBookings = bookings.filter(function(r) {
+//       const d = new Date(r['Created At'] || r['Date'] || r['Check In']);
+//       if (isNaN(d.getTime())) return false;
+//       if (start && d < start) return false;
+//       if (end && d > end) return false;
+
+//       const paymentStatus = String(r['Payment Status'] || '').trim().toLowerCase();
+//       const netAmount = Number(r['Net Amount'] || 0);
+//       return paymentStatus !== 'free/pr' && netAmount > 0;
+//     });
+
+//     const filteredPayments = payments.filter(function(r) {
+//       const d = new Date(r['Date'] || r['Payment Date']);
+//       if (isNaN(d.getTime())) return false;
+//       if (start && d < start) return false;
+//       if (end && d > end) return false;
+
+//       const status = String(r['Status'] || r['Note'] || '').trim().toLowerCase();
+//       const amount = Number(r['Amount'] || 0);
+//       return status !== 'free/pr' && amount > 0;
+//     });
+
+//     let totalRevenue = 0;
+//     let totalPaid = 0;
+//     let totalPartPaid = 0;
+
+//     filteredPayments.forEach(function(p) {
+//       const amt = Number(p['Amount'] || 0);
+//       totalRevenue += amt;
+
+//       const status = String(p['Status'] || p['Note'] || '').trim().toLowerCase();
+//       if (status === 'paid') totalPaid += amt;
+//       if (status === 'part paid') totalPartPaid += amt;
+//     });
+
+//     let totalReserved = 0;
+//     let totalCheckedIn = 0;
+//     let totalCheckedOut = 0;
+//     let totalCancelled = 0;
+
+//     filteredBookings.forEach(function(b) {
+//       const status = String(b['Status'] || '').trim().toLowerCase();
+//       if (status === 'reserved') totalReserved++;
+//       if (status === 'checked in') totalCheckedIn++;
+//       if (status === 'checked out') totalCheckedOut++;
+//       if (status === 'cancelled') totalCancelled++;
+//     });
+
+//     const doc = DocumentApp.create('Financial Report');
+//     const body = doc.getBody();
+//     const section = doc.getActiveSection();
+
+//     section.setPageWidth(842);
+//     section.setPageHeight(595);
+
+//     body.setMarginTop(20);
+//     body.setMarginBottom(20);
+//     body.setMarginLeft(20);
+//     body.setMarginRight(20);
+
+//     try {
+//       const branding = getBranding_();
+//       const dataUri = String(branding.logoDataUri || '').trim();
+//       if (dataUri && dataUri.indexOf('data:image/') === 0) {
+//         const match = dataUri.match(/^data:([^;]+);base64,(.+)$/);
+//         if (match) {
+//           const blob = Utilities.newBlob(
+//             Utilities.base64Decode(match[2]),
+//             match[1],
+//             'logo'
+//           );
+//           body.appendImage(blob).setHeight(60);
+//         }
+//       }
+//     } catch (logoErr) {}
+
+//     body.appendParagraph('NDDC CLUBHOUSE FINANCIAL REPORT')
+//       .setHeading(DocumentApp.ParagraphHeading.HEADING1);
+
+//     body.appendParagraph(
+//       'Period: ' + (startDate || 'Beginning') + ' → ' + (endDate || 'Today')
+//     );
+
+//     body.appendParagraph(
+//       'Generated: ' + Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'dd MMM yyyy HH:mm')
+//     );
+
+//     body.appendParagraph(' ');
+
+//     body.appendParagraph('SUMMARY').setBold(true);
+//     body.appendParagraph('Total Revenue: ₦' + totalRevenue.toLocaleString());
+//     body.appendParagraph('Paid: ₦' + totalPaid.toLocaleString());
+//     body.appendParagraph('Part Paid: ₦' + totalPartPaid.toLocaleString());
+//     body.appendParagraph('Reserved: ' + totalReserved);
+//     body.appendParagraph('Checked In: ' + totalCheckedIn);
+//     body.appendParagraph('Checked Out: ' + totalCheckedOut);
+//     body.appendParagraph('Cancelled: ' + totalCancelled);
+
+//     body.appendParagraph(' ');
+//     body.appendParagraph('PAYMENT HISTORY').setBold(true);
+
+//     const table = body.appendTable();
+//     const header = table.appendTableRow();
+
+//     ['Res ID', 'Guest', 'Room', 'Amount', 'RRR', 'Status', 'Date'].forEach(function(h) {
+//       header.appendTableCell(h).setBold(true);
+//     });
+
+//     filteredPayments.forEach(function(r) {
+//       const row = table.appendTableRow();
+//       row.appendTableCell(String(r['Res ID'] || ''));
+//       row.appendTableCell(String(r['Guest Name'] || ''));
+//       row.appendTableCell(String(r['Room No'] || ''));
+//       row.appendTableCell('₦' + Number(r['Amount'] || 0).toLocaleString());
+//       row.appendTableCell(String(r['RRR'] || r['RRR Number'] || ''));
+//       row.appendTableCell(String(r['Status'] || r['Note'] || ''));
+//       row.appendTableCell(
+//         Utilities.formatDate(
+//           new Date(r['Date'] || r['Payment Date']),
+//           Session.getScriptTimeZone(),
+//           'dd MMM yyyy'
+//         )
+//       );
+//     });
+
+//     doc.saveAndClose();
+
+//     const pdfBlob = DriveApp.getFileById(doc.getId()).getBlob().getAs(MimeType.PDF);
+
+//     return {
+//       ok: true,
+//       blob: Utilities.base64Encode(pdfBlob.getBytes()),
+//       fileName: 'Financial_Report_' + Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyyMMdd_HHmmss') + '.pdf'
+//     };
+
+//   } catch (err) {
+//     return {
+//       ok: false,
+//       message: err.message
+//     };
+//   }
+// }
+function downloadFinancialReport(startDate, endDate) {
+  try {
+    ensureOperationalSheets_();
+
+    const start = startDate ? new Date(startDate) : null;
+    const end = endDate ? new Date(endDate) : null;
+
+    const bookingSheet = getSheet_(SHEETS.bookingHistory);
+    const paymentSheet = getSheet_(SHEETS.paymentHistory);
+
+    const bookings = getObjects_(bookingSheet);
+    const payments = getObjects_(paymentSheet);
+
+    const filteredBookings = bookings.filter(function(r) {
+      const d = new Date(r['Created At'] || r['Date'] || r['Check In']);
+      if (isNaN(d.getTime())) return false;
+      if (start && d < start) return false;
+      if (end && d > end) return false;
+
+      const paymentStatus = String(r['Payment Status'] || '').trim().toLowerCase();
+      const netAmount = Number(r['Net Amount'] || 0);
+      return paymentStatus !== 'free/pr' && netAmount > 0;
+    });
+
+    const filteredPayments = payments.filter(function(r) {
+      const d = new Date(r['Date'] || r['Payment Date']);
+      if (isNaN(d.getTime())) return false;
+      if (start && d < start) return false;
+      if (end && d > end) return false;
+
+      const status = String(r['Status'] || r['Note'] || '').trim().toLowerCase();
+      const amount = Number(r['Amount'] || 0);
+      return status !== 'free/pr' && amount > 0;
+    });
+
+    let totalRevenue = 0;
+    let totalPaid = 0;
+    let totalPartPaid = 0;
+
+    filteredPayments.forEach(function(p) {
+      const amt = Number(p['Amount'] || 0);
+      totalRevenue += amt;
+
+      const status = String(p['Status'] || p['Note'] || '').trim().toLowerCase();
+      if (status === 'paid') totalPaid += amt;
+      if (status === 'part paid') totalPartPaid += amt;
+    });
+
+    let totalReserved = 0;
+    let totalCheckedIn = 0;
+    let totalCheckedOut = 0;
+    let totalCancelled = 0;
+
+    filteredBookings.forEach(function(b) {
+      const status = String(b['Status'] || '').trim().toLowerCase();
+      if (status === 'reserved') totalReserved++;
+      if (status === 'checked in') totalCheckedIn++;
+      if (status === 'checked out') totalCheckedOut++;
+      if (status === 'cancelled') totalCancelled++;
+    });
+
+    const doc = DocumentApp.create('Financial Report');
+    const body = doc.getBody();
+    const section = doc.getActiveSection();
+
+    section.setPageWidth(842);
+    section.setPageHeight(595);
+
+    body.setMarginTop(20);
+    body.setMarginBottom(20);
+    body.setMarginLeft(20);
+    body.setMarginRight(20);
+
+    try {
+      const branding = getBranding_();
+      const dataUri = String(branding.logoDataUri || '').trim();
+      if (dataUri && dataUri.indexOf('data:image/') === 0) {
+        const match = dataUri.match(/^data:([^;]+);base64,(.+)$/);
+        if (match) {
+          const blob = Utilities.newBlob(
+            Utilities.base64Decode(match[2]),
+            match[1],
+            'logo'
+          );
+          body.appendImage(blob).setHeight(60);
+        }
+      }
+    } catch (logoErr) {}
+
+    body.appendParagraph('NDDC CLUBHOUSE FINANCIAL REPORT')
+      .setHeading(DocumentApp.ParagraphHeading.HEADING1);
+
+    body.appendParagraph(
+      'Period: ' + (startDate || 'Beginning') + ' → ' + (endDate || 'Today')
+    );
+
+    body.appendParagraph(
+      'Generated: ' + Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'dd MMM yyyy HH:mm')
+    );
+
+    body.appendParagraph(' ');
+
+    body.appendParagraph('SUMMARY').setBold(true);
+    body.appendParagraph('Total Revenue: ₦' + totalRevenue.toLocaleString());
+    body.appendParagraph('Paid: ₦' + totalPaid.toLocaleString());
+    body.appendParagraph('Part Paid: ₦' + totalPartPaid.toLocaleString());
+    body.appendParagraph('Reserved: ' + totalReserved);
+    body.appendParagraph('Checked In: ' + totalCheckedIn);
+    body.appendParagraph('Checked Out: ' + totalCheckedOut);
+    body.appendParagraph('Cancelled: ' + totalCancelled);
+
+    body.appendParagraph(' ');
+    body.appendParagraph('PAYMENT HISTORY').setBold(true);
+
+    const table = body.appendTable();
+
+    // ✅ UPDATED HEADER (Guest, Status, Date removed)
+    const header = table.appendTableRow();
+    ['Res ID', 'Room', 'Amount', 'RRR'].forEach(function(h) {
+      header.appendTableCell(h);
+    });
+
+    // ✅ UPDATED ROWS
+    filteredPayments.forEach(function(r) {
+      const row = table.appendTableRow();
+
+      row.appendTableCell(String(r['Res ID'] || ''));
+      row.appendTableCell(String(r['Room No'] || ''));
+      row.appendTableCell('₦' + Number(r['Amount'] || 0).toLocaleString());
+      row.appendTableCell(String(r['RRR'] || r['RRR Number'] || ''));
+    });
+
+    doc.saveAndClose();
+
+    const pdfBlob = DriveApp.getFileById(doc.getId()).getBlob().getAs(MimeType.PDF);
+
+    return {
+      ok: true,
+      blob: Utilities.base64Encode(pdfBlob.getBytes()),
+      fileName: 'Financial_Report_' + Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyyMMdd_HHmmss') + '.pdf'
+    };
+
+  } catch (err) {
+    return {
+      ok: false,
+      message: err.message
+    };
+  }
+}
+
 function downloadBookingPaymentReportPdf(payload) {
   try {
     const user = requireUser_();
@@ -2233,6 +3280,10 @@ function downloadBookingPaymentReportPdf(payload) {
   } catch (err) {
     return { ok: false, message: err.message };
   }
+}
+
+function downloadFinancialReportPdf(payload) {
+  return downloadFinancialReport(startDate, endDate);
 }
 
 function getCleaningReportData_(payload, currentUser) {
