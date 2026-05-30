@@ -19,7 +19,13 @@ const SHEETS = {
   nonRoomCleaningHistory: 'Non-Room Cleaning History'
 };
 
-function doGet() {
+function doGet(e) {
+  if (e && e.parameter && e.parameter.portal === 'backdated') {
+    return HtmlService.createTemplateFromFile('BackdatedPortal')
+      .evaluate()
+      .setTitle('Backdated Entry Portal')
+      .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+  }
   return HtmlService.createTemplateFromFile('Index')
     .evaluate()
     .setTitle(APP_TITLE)

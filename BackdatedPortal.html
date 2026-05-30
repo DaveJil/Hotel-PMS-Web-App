@@ -1,0 +1,1035 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NDDC Backdated Entry Portal</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;700;900&family=DM+Sans:wght@300;400;500;600&display=swap');
+
+    :root {
+      --bg: #080808;
+      --surface: #101010;
+      --surface-2: #161616;
+      --surface-3: #1c1c1c;
+      --gold: #c9a227;
+      --gold-dim: rgba(201,162,39,0.18);
+      --gold-glow: rgba(201,162,39,0.08);
+      --text: #f0ede6;
+      --muted: #888;
+      --danger: #e05252;
+      --success: #52c97a;
+      --border: rgba(201,162,39,0.2);
+      --border-subtle: rgba(255,255,255,0.06);
+      --radius: 16px;
+      --radius-sm: 10px;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'DM Sans', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+
+    /* ── TOASTS ─────────────────────────────── */
+    #toastStack {
+      position: fixed; bottom: 20px; right: 20px;
+      display: flex; flex-direction: column; gap: 10px; z-index: 9999;
+    }
+    .toast {
+      padding: 14px 18px; border-radius: 12px;
+      background: var(--surface-2); border: 1px solid var(--border);
+      font-size: .88rem; min-width: 260px;
+      animation: slideIn .25s ease;
+    }
+    .toast.success { border-color: rgba(82,201,122,.4); color: #8ff0ae; }
+    .toast.error   { border-color: rgba(224,82,82,.4);  color: #ffaaaa; }
+    @keyframes slideIn { from { transform: translateX(30px); opacity:0; } to { transform: none; opacity:1; } }
+
+    /* ── LOGIN SCREEN ────────────────────────── */
+    #loginScreen {
+      min-height: 100vh; display: flex;
+      align-items: center; justify-content: center;
+      padding: 20px;
+      background: radial-gradient(ellipse 80% 60% at 50% 0%, rgba(201,162,39,0.07), transparent);
+    }
+    .login-box {
+      width: min(440px, 100%);
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 24px;
+      padding: 36px 32px;
+      box-shadow: 0 32px 80px rgba(0,0,0,0.5);
+    }
+    .login-box .portal-badge {
+      display: inline-block;
+      background: var(--gold-dim);
+      color: var(--gold);
+      font-size: .72rem; font-weight: 600; letter-spacing: .12em;
+      text-transform: uppercase; padding: 5px 12px; border-radius: 999px;
+      border: 1px solid var(--border); margin-bottom: 18px;
+    }
+    .login-box h1 {
+      font-family: 'Playfair Display', serif;
+      font-size: 1.9rem; font-weight: 700;
+      color: var(--text); margin-bottom: 6px;
+    }
+    .login-box p { color: var(--muted); font-size: .9rem; margin-bottom: 28px; }
+
+    /* ── SHARED FORM ELEMENTS ────────────────── */
+    .field { margin-bottom: 16px; }
+    .field label { display: block; font-size: .8rem; color: var(--muted); margin-bottom: 7px; font-weight: 500; letter-spacing: .04em; }
+    .field input, .field select, .field textarea {
+      width: 100%; padding: 11px 14px;
+      background: var(--surface-3); color: var(--text);
+      border: 1px solid var(--border-subtle); border-radius: var(--radius-sm);
+      font-family: 'DM Sans', sans-serif; font-size: .9rem;
+      outline: none; transition: border-color .2s;
+    }
+    .field input:focus, .field select:focus, .field textarea:focus {
+      border-color: var(--gold);
+      box-shadow: 0 0 0 3px rgba(201,162,39,0.1);
+    }
+    .field textarea { min-height: 80px; resize: vertical; }
+    .field select option { background: #1a1a1a; }
+
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+    .span-2 { grid-column: 1/-1; }
+
+    .btn {
+      display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+      padding: 12px 20px; border-radius: var(--radius-sm);
+      font-family: 'DM Sans', sans-serif; font-weight: 600; font-size: .88rem;
+      cursor: pointer; border: none; transition: all .15s; white-space: nowrap;
+    }
+    .btn:disabled { opacity: .5; cursor: not-allowed; }
+    .btn-gold {
+      background: linear-gradient(135deg, #dfbf48, #b08a12);
+      color: #111; box-shadow: 0 6px 20px rgba(201,162,39,0.25);
+    }
+    .btn-gold:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 8px 28px rgba(201,162,39,0.35); }
+    .btn-ghost {
+      background: transparent; color: var(--muted);
+      border: 1px solid var(--border-subtle);
+    }
+    .btn-ghost:hover:not(:disabled) { border-color: var(--border); color: var(--text); }
+    .btn-danger {
+      background: rgba(224,82,82,0.12); color: var(--danger);
+      border: 1px solid rgba(224,82,82,0.25);
+    }
+    .btn-danger:hover:not(:disabled) { background: rgba(224,82,82,0.2); }
+    .btn-sm { padding: 7px 12px; font-size: .8rem; }
+    .btn-full { width: 100%; }
+
+    /* ── APP SHELL ───────────────────────────── */
+    #appScreen { display: none; min-height: 100vh; }
+
+    .topbar {
+      padding: 14px 24px;
+      display: flex; align-items: center; justify-content: space-between;
+      border-bottom: 1px solid var(--border-subtle);
+      background: rgba(8,8,8,0.9); backdrop-filter: blur(12px);
+      position: sticky; top: 0; z-index: 100;
+    }
+    .topbar-brand {
+      display: flex; align-items: center; gap: 12px;
+    }
+    .topbar-brand .dot {
+      width: 8px; height: 8px; border-radius: 50%; background: var(--gold);
+      box-shadow: 0 0 10px var(--gold);
+    }
+    .topbar-brand h2 {
+      font-family: 'Playfair Display', serif; font-size: 1.1rem; font-weight: 700;
+    }
+    .topbar-brand .badge {
+      font-size: .68rem; font-weight: 700; letter-spacing: .1em; text-transform: uppercase;
+      padding: 3px 8px; border-radius: 999px;
+      background: rgba(224,82,82,0.12); color: #ff9f9f;
+      border: 1px solid rgba(224,82,82,0.25);
+    }
+    .topbar-right { display: flex; gap: 10px; align-items: center; }
+    .user-chip {
+      font-size: .8rem; color: var(--muted); padding: 6px 12px;
+      background: var(--surface-2); border-radius: 999px;
+      border: 1px solid var(--border-subtle);
+    }
+
+    .tabs-bar {
+      padding: 0 24px;
+      border-bottom: 1px solid var(--border-subtle);
+      display: flex; gap: 2px; overflow-x: auto;
+    }
+    .tab-btn {
+      padding: 14px 18px; background: none; border: none;
+      font-family: 'DM Sans', sans-serif; font-size: .86rem; font-weight: 500;
+      color: var(--muted); cursor: pointer; white-space: nowrap;
+      border-bottom: 2px solid transparent; transition: all .2s; margin-bottom: -1px;
+    }
+    .tab-btn:hover { color: var(--text); }
+    .tab-btn.active { color: var(--gold); border-bottom-color: var(--gold); }
+
+    .content { padding: 28px 24px; max-width: 1200px; margin: 0 auto; }
+
+    /* ── PANEL / CARD ─────────────────────────── */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius);
+      padding: 24px; margin-bottom: 20px;
+    }
+    .card-header {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 20px; flex-wrap: wrap; gap: 10px;
+    }
+    .card-header h3 {
+      font-family: 'Playfair Display', serif; font-size: 1.15rem; font-weight: 700;
+    }
+    .card-header p { color: var(--muted); font-size: .83rem; margin-top: 3px; }
+
+    /* ── STAT ROW ─────────────────────────────── */
+    .stat-row { display: grid; grid-template-columns: repeat(4,1fr); gap: 14px; margin-bottom: 24px; }
+    .stat-tile {
+      background: var(--surface); border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-sm); padding: 18px;
+    }
+    .stat-tile .label { font-size: .75rem; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; margin-bottom: 10px; }
+    .stat-tile .value { font-size: 1.7rem; font-weight: 700; color: var(--text); }
+    .stat-tile .value.gold { color: var(--gold); }
+
+    /* ── TABLE ────────────────────────────────── */
+    .tbl-wrap { overflow-x: auto; margin-top: 4px; }
+    table { width: 100%; border-collapse: collapse; font-size: .86rem; }
+    th { padding: 10px 12px; border-bottom: 1px solid var(--border-subtle); color: var(--gold); font-weight: 600; text-align: left; font-size: .76rem; text-transform: uppercase; letter-spacing: .06em; }
+    td { padding: 12px 12px; border-bottom: 1px solid var(--border-subtle); vertical-align: middle; }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: rgba(255,255,255,.02); }
+
+    .empty-row td { text-align: center; color: var(--muted); padding: 32px; font-size: .88rem; }
+
+    /* ── BADGE ────────────────────────────────── */
+    .bdg {
+      display: inline-block; padding: 4px 9px; border-radius: 999px;
+      font-size: .72rem; font-weight: 700;
+    }
+    .bdg-green  { background: rgba(82,201,122,.12); color: #8ff0ae; border: 1px solid rgba(82,201,122,.2); }
+    .bdg-red    { background: rgba(224,82,82,.12);  color: #ffaaaa; border: 1px solid rgba(224,82,82,.2); }
+    .bdg-gold   { background: rgba(201,162,39,.12); color: #f0d472; border: 1px solid rgba(201,162,39,.2); }
+    .bdg-gray   { background: rgba(136,136,136,.12);color: #bbb;    border: 1px solid rgba(136,136,136,.2); }
+
+    /* ── MODAL ────────────────────────────────── */
+    .modal-overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,.75);
+      backdrop-filter: blur(6px); display: flex;
+      align-items: center; justify-content: center; z-index: 500; padding: 20px;
+    }
+    .modal-box {
+      width: min(680px, 100%); max-height: 90vh; overflow-y: auto;
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 20px; padding: 28px;
+      box-shadow: 0 40px 100px rgba(0,0,0,0.6);
+    }
+    .modal-box h3 {
+      font-family: 'Playfair Display', serif; font-size: 1.25rem;
+      margin-bottom: 6px;
+    }
+    .modal-box .modal-sub { color: var(--muted); font-size: .84rem; margin-bottom: 22px; }
+    .modal-footer { display: flex; gap: 10px; justify-content: flex-end; margin-top: 20px; flex-wrap: wrap; }
+
+    /* ── INFO BOX ─────────────────────────────── */
+    .info-box {
+      background: var(--gold-glow); border: 1px solid var(--border);
+      border-radius: var(--radius-sm); padding: 14px 16px;
+      font-size: .84rem; color: var(--muted); margin-bottom: 18px;
+    }
+    .info-box strong { color: var(--gold); }
+
+    .section-sep { height: 1px; background: var(--border-subtle); margin: 24px 0; }
+
+    .loading-spinner {
+      width: 20px; height: 20px; border-radius: 50%;
+      border: 2px solid rgba(201,162,39,0.2); border-top-color: var(--gold);
+      animation: spin .7s linear infinite; display: inline-block;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .back-link {
+      display: inline-flex; align-items: center; gap: 6px;
+      color: var(--muted); font-size: .82rem; cursor: pointer;
+      margin-bottom: 20px; transition: color .15s;
+    }
+    .back-link:hover { color: var(--gold); }
+
+    @media (max-width: 768px) {
+      .stat-row { grid-template-columns: repeat(2,1fr); }
+      .grid-2 { grid-template-columns: 1fr; }
+      .content { padding: 16px; }
+      .topbar { padding: 12px 16px; }
+      .tabs-bar { padding: 0 16px; }
+    }
+    @media (max-width: 480px) {
+      .stat-row { grid-template-columns: 1fr 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ════════════════════════════════════════════
+     LOGIN SCREEN
+════════════════════════════════════════════ -->
+<div id="loginScreen">
+  <div class="login-box">
+    <span class="portal-badge">Restricted Access</span>
+    <h1>Backdated Entry Portal</h1>
+    <p>Log external transactions and historical records into the NDDC PMS.</p>
+
+    <div class="field">
+      <label>Portal Username</label>
+      <input id="portalUsername" type="text" placeholder="Enter username" autocomplete="username">
+    </div>
+    <div class="field">
+      <label>Password / PIN</label>
+      <input id="portalPassword" type="password" placeholder="Enter password" autocomplete="current-password">
+    </div>
+    <button class="btn btn-gold btn-full" id="loginBtn" onclick="doPortalLogin(this)" style="margin-top:8px">
+      Sign In
+    </button>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════
+     APP SCREEN
+════════════════════════════════════════════ -->
+<div id="appScreen">
+
+  <!-- TOPBAR -->
+  <div class="topbar">
+    <div class="topbar-brand">
+      <div class="dot"></div>
+      <h2>NDDC Clubhouse</h2>
+      <span class="badge">Backdated Portal</span>
+    </div>
+    <div class="topbar-right">
+      <span class="user-chip" id="userChip">—</span>
+      <button class="btn btn-ghost btn-sm" onclick="doLogout()">Sign Out</button>
+    </div>
+  </div>
+
+  <!-- TABS -->
+  <div class="tabs-bar">
+    <button class="tab-btn active" data-tab="new" onclick="switchTab('new',this)">New Entry</button>
+    <button class="tab-btn" data-tab="history" onclick="switchTab('history',this)">Entry History</button>
+    <button class="tab-btn" data-tab="summary" onclick="switchTab('summary',this)">Summary</button>
+  </div>
+
+  <!-- CONTENT -->
+  <div class="content">
+
+    <!-- ── NEW ENTRY TAB ── -->
+    <div id="tab-new">
+
+      <div class="info-box">
+        <strong>Backdated Entry Mode</strong> — All records created here are tagged as backdated and will appear in Booking History, Payment History, and all financial &amp; booking reports with their original transaction dates.
+      </div>
+
+      <!-- Entry Type Selector -->
+      <div class="card">
+        <div class="card-header">
+          <div>
+            <h3>Entry Type</h3>
+            <p>Select the type of backdated record to create</p>
+          </div>
+        </div>
+        <div style="display:flex; gap:10px; flex-wrap:wrap;">
+          <button class="btn btn-gold" onclick="showEntryForm('reservation')">📋 Reservation + Payment</button>
+          <button class="btn btn-ghost" onclick="showEntryForm('payment')">💳 Payment Only</button>
+          <button class="btn btn-ghost" onclick="showEntryForm('extension')">🔄 Stay Extension</button>
+          <button class="btn btn-ghost" onclick="showEntryForm('checkout')">🚪 Checkout Record</button>
+          <button class="btn btn-ghost" onclick="showEntryForm('latecheckout')">⏰ Late Checkout Fee</button>
+        </div>
+      </div>
+
+      <!-- FORM CONTAINER -->
+      <div id="entryFormContainer"></div>
+
+    </div>
+
+    <!-- ── HISTORY TAB ── -->
+    <div id="tab-history" style="display:none">
+      <div class="card">
+        <div class="card-header">
+          <div>
+            <h3>Backdated Entry Log</h3>
+            <p>All records created through this portal</p>
+          </div>
+          <button class="btn btn-ghost btn-sm" onclick="loadHistory()">↻ Refresh</button>
+        </div>
+        <div class="tbl-wrap">
+          <table id="historyTable">
+            <thead>
+              <tr>
+                <th>Entry ID</th><th>Type</th><th>Res ID</th><th>Guest</th>
+                <th>Room</th><th>Amount</th><th>Tx Date</th><th>Entered By</th><th>Status</th>
+              </tr>
+            </thead>
+            <tbody id="historyBody">
+              <tr class="empty-row"><td colspan="9">Loading…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── SUMMARY TAB ── -->
+    <div id="tab-summary" style="display:none">
+      <div class="stat-row" id="summaryStats">
+        <div class="stat-tile"><div class="label">Total Entries</div><div class="value" id="ss-total">—</div></div>
+        <div class="stat-tile"><div class="label">Total Revenue</div><div class="value gold" id="ss-revenue">—</div></div>
+        <div class="stat-tile"><div class="label">Reservations</div><div class="value" id="ss-res">—</div></div>
+        <div class="stat-tile"><div class="label">Payments</div><div class="value" id="ss-pay">—</div></div>
+      </div>
+      <div class="card">
+        <div class="card-header">
+          <div>
+            <h3>Backdated Entries by Month</h3>
+            <p>Aggregated from all portal submissions</p>
+          </div>
+        </div>
+        <div class="tbl-wrap">
+          <table>
+            <thead>
+              <tr><th>Month</th><th>Entries</th><th>Revenue</th></tr>
+            </thead>
+            <tbody id="summaryByMonth">
+              <tr class="empty-row"><td colspan="3">Loading…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /content -->
+</div><!-- /appScreen -->
+
+<!-- TOAST STACK -->
+<div id="toastStack"></div>
+
+<script>
+/* ═══════════════════════════════════════════════════
+   STATE
+═══════════════════════════════════════════════════ */
+var PORTAL = {
+  user: null,
+  rooms: [],
+  reservations: [],
+  channels: ['Walk-in','Website','OTA','Corporate','Referral'],
+  history: []
+};
+
+var APARTMENT_RATE = 300000;
+
+/* ═══════════════════════════════════════════════════
+   BOOT
+═══════════════════════════════════════════════════ */
+document.addEventListener('DOMContentLoaded', function(){
+  // Check if there's a live session already
+  google.script.run
+    .withSuccessHandler(function(res){
+      if (res && res.ok && res.user && res.user.role === 'Backdated') {
+        bootApp(res);
+      }
+    })
+    .withFailureHandler(function(){})
+    .getPortalBootstrap();
+});
+
+/* ═══════════════════════════════════════════════════
+   AUTH
+═══════════════════════════════════════════════════ */
+function doPortalLogin(btn){
+  var u = (document.getElementById('portalUsername').value || '').trim();
+  var p = document.getElementById('portalPassword').value || '';
+  if (!u || !p){ toast('Enter credentials.','error'); return; }
+
+  setBusy(btn, true);
+  google.script.run
+    .withSuccessHandler(function(res){
+      setBusy(btn, false);
+      if (!res || !res.ok){ toast(res ? res.message : 'Login failed','error'); return; }
+      if (res.user.role !== 'Backdated'){
+        toast('Access denied — Backdated role required.','error'); return;
+      }
+      bootApp(res);
+    })
+    .withFailureHandler(function(err){
+      setBusy(btn, false);
+      toast((err && err.message) || 'Login failed','error');
+    })
+    .portalLogin(u, p);
+}
+
+function bootApp(res){
+  PORTAL.user = res.user;
+  PORTAL.rooms = res.rooms || [];
+  PORTAL.reservations = res.reservations || [];
+  PORTAL.channels = res.channels || PORTAL.channels;
+
+  document.getElementById('loginScreen').style.display = 'none';
+  document.getElementById('appScreen').style.display = 'block';
+  document.getElementById('userChip').textContent = res.user.fullName || res.user.username;
+}
+
+function doLogout(){
+  google.script.run
+    .withSuccessHandler(function(){ location.reload(); })
+    .withFailureHandler(function(){ location.reload(); })
+    .portalLogout();
+}
+
+/* ═══════════════════════════════════════════════════
+   TABS
+═══════════════════════════════════════════════════ */
+function switchTab(name, btn){
+  ['new','history','summary'].forEach(function(t){
+    document.getElementById('tab-'+t).style.display = (t===name ? '' : 'none');
+  });
+  document.querySelectorAll('.tab-btn').forEach(function(b){ b.classList.remove('active'); });
+  btn.classList.add('active');
+
+  if (name === 'history') loadHistory();
+  if (name === 'summary') loadSummary();
+}
+
+/* ═══════════════════════════════════════════════════
+   HISTORY
+═══════════════════════════════════════════════════ */
+function loadHistory(){
+  var tbody = document.getElementById('historyBody');
+  tbody.innerHTML = '<tr class="empty-row"><td colspan="9"><span class="loading-spinner"></span></td></tr>';
+
+  google.script.run
+    .withSuccessHandler(function(res){
+      if (!res || !res.ok){ tbody.innerHTML = '<tr class="empty-row"><td colspan="9">Failed to load.</td></tr>'; return; }
+      PORTAL.history = res.rows || [];
+      renderHistory(PORTAL.history);
+    })
+    .withFailureHandler(function(){
+      tbody.innerHTML = '<tr class="empty-row"><td colspan="9">Error loading history.</td></tr>';
+    })
+    .getBackdatedEntries();
+}
+
+function renderHistory(rows){
+  var tbody = document.getElementById('historyBody');
+  if (!rows.length){
+    tbody.innerHTML = '<tr class="empty-row"><td colspan="9">No backdated entries yet.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows.map(function(r){
+    return '<tr>'+
+      '<td><span style="font-size:.78rem;color:var(--muted)">'+esc(r.entryId)+'</span></td>'+
+      '<td>'+typeBadge(r.entryType)+'</td>'+
+      '<td>'+esc(r.resId||'—')+'</td>'+
+      '<td>'+esc(r.guestName||'—')+'</td>'+
+      '<td>'+esc(r.roomNo||'—')+'</td>'+
+      '<td style="color:var(--gold)">'+fmtMoney(r.amount)+'</td>'+
+      '<td>'+esc(r.txDate||'—')+'</td>'+
+      '<td>'+esc(r.enteredBy||'—')+'</td>'+
+      '<td><span class="bdg bdg-green">Synced</span></td>'+
+    '</tr>';
+  }).join('');
+}
+
+function typeBadge(t){
+  var map = {
+    'Reservation':'bdg-gold','Payment':'bdg-green',
+    'Extension':'bdg-gray','Checkout':'bdg-gray','Late Checkout':'bdg-red'
+  };
+  var cls = map[t] || 'bdg-gray';
+  return '<span class="bdg '+cls+'">'+esc(t||'—')+'</span>';
+}
+
+/* ═══════════════════════════════════════════════════
+   SUMMARY
+═══════════════════════════════════════════════════ */
+function loadSummary(){
+  google.script.run
+    .withSuccessHandler(function(res){
+      if (!res || !res.ok) return;
+      var rows = res.rows || [];
+      var total = rows.length;
+      var revenue = rows.reduce(function(s,r){ return s+Number(r.amount||0); },0);
+      var resCount = rows.filter(function(r){ return r.entryType==='Reservation'; }).length;
+      var payCount = rows.filter(function(r){ return r.entryType==='Payment'; }).length;
+
+      document.getElementById('ss-total').textContent = total;
+      document.getElementById('ss-revenue').textContent = fmtMoney(revenue);
+      document.getElementById('ss-res').textContent = resCount;
+      document.getElementById('ss-pay').textContent = payCount;
+
+      // Group by month
+      var byMonth = {};
+      rows.forEach(function(r){
+        var m = (r.txDate||'').slice(0,7) || 'Unknown';
+        if (!byMonth[m]) byMonth[m] = {entries:0,revenue:0};
+        byMonth[m].entries++;
+        byMonth[m].revenue += Number(r.amount||0);
+      });
+      var months = Object.keys(byMonth).sort().reverse();
+      var tbody = document.getElementById('summaryByMonth');
+      if (!months.length){
+        tbody.innerHTML = '<tr class="empty-row"><td colspan="3">No data yet.</td></tr>';
+        return;
+      }
+      tbody.innerHTML = months.map(function(m){
+        return '<tr><td>'+esc(m)+'</td><td>'+byMonth[m].entries+'</td><td style="color:var(--gold)">'+fmtMoney(byMonth[m].revenue)+'</td></tr>';
+      }).join('');
+    })
+    .withFailureHandler(function(){})
+    .getBackdatedEntries();
+}
+
+/* ═══════════════════════════════════════════════════
+   ENTRY FORMS
+═══════════════════════════════════════════════════ */
+function showEntryForm(type){
+  var c = document.getElementById('entryFormContainer');
+  c.innerHTML = '';
+  if (type === 'reservation')   c.innerHTML = buildReservationForm();
+  else if (type === 'payment')  c.innerHTML = buildPaymentForm();
+  else if (type === 'extension') c.innerHTML = buildExtensionForm();
+  else if (type === 'checkout') c.innerHTML = buildCheckoutForm();
+  else if (type === 'latecheckout') c.innerHTML = buildLateCheckoutForm();
+  c.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+/* ─────────────── ROOM OPTIONS ──────────────── */
+function roomOptions(selectedVal){
+  var seen = {};
+  var opts = [];
+
+  PORTAL.rooms.forEach(function(r){
+    if (r.apartmentGroup && !seen[r.apartmentGroup]){
+      seen[r.apartmentGroup] = true;
+      var sel = (selectedVal === r.apartmentGroup) ? ' selected' : '';
+      opts.push('<option value="'+ea(r.apartmentGroup)+'"'+sel+'>'+esc(r.apartmentGroup)+' - Apartment - ₦'+fmt(APARTMENT_RATE)+'</option>');
+    }
+  });
+  PORTAL.rooms.forEach(function(r){
+    var sel = (selectedVal === r.roomNo) ? ' selected' : '';
+    opts.push('<option value="'+ea(r.roomNo)+'"'+sel+'>'+esc(r.roomNo)+' - '+esc(r.roomType)+' - ₦'+fmt(r.rate)+'</option>');
+  });
+  return opts.join('');
+}
+
+function channelOptions(){
+  return PORTAL.channels.map(function(c){ return '<option value="'+ea(c)+'">'+esc(c)+'</option>'; }).join('');
+}
+
+/* ─────────────── 1. RESERVATION FORM ──────── */
+function buildReservationForm(){
+  return '<div class="card" id="form-reservation">'+
+    '<div class="card-header"><div><h3>Backdated Reservation + Payment</h3><p>Creates a booking history record, room entry, and payment record with the original transaction date.</p></div>'+
+    '<button class="btn btn-ghost btn-sm" onclick="document.getElementById(\'entryFormContainer\').innerHTML=\'\'">✕ Close</button></div>'+
+    '<div class="grid-2">'+
+      '<div class="field"><label>Guest Name *</label><input id="r_guestName" placeholder="Full name"></div>'+
+      '<div class="field"><label>Phone</label><input id="r_phone" placeholder="+234…"></div>'+
+      '<div class="field"><label>Email</label><input id="r_email" type="email" placeholder="guest@email.com"></div>'+
+      '<div class="field"><label>Room / Apartment *</label><select id="r_room" onchange="updateResPreview()">'+roomOptions()+'</select></div>'+
+      '<div class="field"><label>Check In Date *</label><input id="r_checkIn" type="date" onchange="updateResPreview()"></div>'+
+      '<div class="field"><label>Check Out Date *</label><input id="r_checkOut" type="date" onchange="updateResPreview()"></div>'+
+      '<div class="field"><label>Adults</label><input id="r_adults" type="number" value="1" min="1" max="2"></div>'+
+      '<div class="field"><label>Channel</label><select id="r_channel">'+channelOptions()+'</select></div>'+
+      '<div class="field"><label>Discount %</label><input id="r_discount" type="number" value="0" min="0" max="100" onchange="updateResPreview()"></div>'+
+      '<div class="field"><label>Payment Status</label><select id="r_payStatus" onchange="updateResPreview()">'+
+        '<option>Paid</option><option>Part Paid</option><option>Unpaid</option><option>Free/PR</option>'+
+      '</select></div>'+
+      '<div class="field"><label>Reservation Status</label><select id="r_status">'+
+        '<option value="Checked Out">Checked Out</option>'+
+        '<option value="Checked In">Checked In</option>'+
+        '<option value="Reserved">Reserved</option>'+
+        '<option value="Cancelled">Cancelled</option>'+
+      '</select></div>'+
+      '<div class="field"><label>RRR / Reference No.</label><input id="r_rrr" placeholder="Payment reference"></div>'+
+      '<div class="field"><label>Original Transaction Date *</label><input id="r_txDate" type="date"></div>'+
+      '<div class="field"><label>Actual Check Out (if checked out)</label><input id="r_actualCheckout" type="datetime-local"></div>'+
+      '<div class="field span-2"><label>Notes</label><textarea id="r_notes" placeholder="Any additional notes"></textarea></div>'+
+      '<div class="span-2" id="resPreviewBox" style="background:var(--surface-2);border:1px solid var(--border);border-radius:10px;padding:14px;font-size:.85rem;color:var(--muted)">Select dates and room to see price preview.</div>'+
+      '<div class="span-2 modal-footer"><button class="btn btn-gold" onclick="submitReservationEntry(this)">Save Backdated Reservation</button></div>'+
+    '</div>'+
+  '</div>';
+}
+
+function updateResPreview(){
+  var room = document.getElementById('r_room');
+  var ci = document.getElementById('r_checkIn');
+  var co = document.getElementById('r_checkOut');
+  var disc = document.getElementById('r_discount');
+  var ps = document.getElementById('r_payStatus');
+  var box = document.getElementById('resPreviewBox');
+  if (!room || !ci || !co || !box) return;
+
+  var nights = nightsBetween(ci.value, co.value);
+  var rate = getRoomRate(room.value);
+  var isFree = isFreePr(ps ? ps.value : '');
+  var gross = isFree ? 0 : rate * nights;
+  var net = isFree ? 0 : Math.round(gross * (1 - Number(disc ? disc.value : 0)/100));
+
+  box.innerHTML = '<strong style="color:var(--gold)">Price Preview</strong> &nbsp;|&nbsp; Rate: ₦'+fmt(rate)+'/night &nbsp;|&nbsp; Nights: '+nights+' &nbsp;|&nbsp; <strong style="color:var(--text)">Total: ₦'+fmt(net)+'</strong>';
+}
+
+function submitReservationEntry(btn){
+  var payload = {
+    entryType: 'Reservation',
+    guestName: (document.getElementById('r_guestName').value||'').trim(),
+    phone: (document.getElementById('r_phone').value||'').trim(),
+    email: (document.getElementById('r_email').value||'').trim(),
+    roomNo: document.getElementById('r_room').value,
+    checkIn: document.getElementById('r_checkIn').value,
+    checkOut: document.getElementById('r_checkOut').value,
+    adults: Number(document.getElementById('r_adults').value||1),
+    channel: document.getElementById('r_channel').value,
+    discountPct: Number(document.getElementById('r_discount').value||0),
+    paymentStatus: document.getElementById('r_payStatus').value,
+    reservationStatus: document.getElementById('r_status').value,
+    rrrNumber: (document.getElementById('r_rrr').value||'').trim(),
+    txDate: document.getElementById('r_txDate').value,
+    actualCheckout: (document.getElementById('r_actualCheckout').value||'').trim(),
+    notes: (document.getElementById('r_notes').value||'').trim()
+  };
+  if (!payload.guestName) return toast('Guest name is required.','error');
+  if (!payload.roomNo) return toast('Select a room.','error');
+  if (!payload.checkIn || !payload.checkOut) return toast('Check-in and check-out dates required.','error');
+  if (!payload.txDate) return toast('Original transaction date is required.','error');
+
+  setBusy(btn,true);
+  google.script.run
+    .withSuccessHandler(function(res){
+      setBusy(btn,false);
+      if (!res||!res.ok){ toast(res?res.message:'Save failed','error'); return; }
+      toast('Reservation entry saved and synced to reports.','success');
+      document.getElementById('entryFormContainer').innerHTML='';
+    })
+    .withFailureHandler(function(err){
+      setBusy(btn,false);
+      toast((err&&err.message)||'Save failed','error');
+    })
+    .saveBackdatedEntry(payload);
+}
+
+/* ─────────────── 2. PAYMENT FORM ──────────── */
+function buildPaymentForm(){
+  return '<div class="card" id="form-payment">'+
+    '<div class="card-header"><div><h3>Backdated Payment</h3><p>Add a payment record to an existing reservation. Shows in Payment History and financial reports.</p></div>'+
+    '<button class="btn btn-ghost btn-sm" onclick="document.getElementById(\'entryFormContainer\').innerHTML=\'\'">✕ Close</button></div>'+
+    '<div class="grid-2">'+
+      '<div class="field"><label>Reservation ID *</label><input id="p_resId" placeholder="RES0001" onblur="lookupResForPayment()"></div>'+
+      '<div class="field"><label>Guest Name</label><input id="p_guestName" placeholder="Auto-fills on lookup"></div>'+
+      '<div class="field"><label>Room No</label><input id="p_roomNo" placeholder="Auto-fills"></div>'+
+      '<div class="field"><label>Payment Type *</label><select id="p_type">'+
+        '<option>Reservation Payment</option>'+
+        '<option>Extension Payment</option>'+
+        '<option>Late Checkout Payment</option>'+
+        '<option>Other</option>'+
+      '</select></div>'+
+      '<div class="field"><label>Amount (₦) *</label><input id="p_amount" type="number" min="0" placeholder="0.00"></div>'+
+      '<div class="field"><label>RRR / Reference *</label><input id="p_rrr" placeholder="Payment reference"></div>'+
+      '<div class="field"><label>Update Payment Status To</label><select id="p_payStatus">'+
+        '<option value="">— No change —</option>'+
+        '<option>Paid</option><option>Part Paid</option>'+
+      '</select></div>'+
+      '<div class="field"><label>Payment Date *</label><input id="p_txDate" type="date"></div>'+
+      '<div class="field span-2"><label>Note</label><textarea id="p_note" placeholder="Optional note"></textarea></div>'+
+      '<div class="span-2 modal-footer"><button class="btn btn-gold" onclick="submitPaymentEntry(this)">Save Payment Record</button></div>'+
+    '</div>'+
+  '</div>';
+}
+
+function lookupResForPayment(){
+  var resId = (document.getElementById('p_resId').value||'').trim();
+  if (!resId) return;
+  google.script.run
+    .withSuccessHandler(function(res){
+      if (!res||!res.ok) return;
+      if (res.data){
+        var f = function(id,v){ var el=document.getElementById(id); if(el&&v) el.value=v; };
+        f('p_guestName', res.data.guestName);
+        f('p_roomNo', res.data.roomNo);
+      }
+    })
+    .withFailureHandler(function(){})
+    .lookupReservationForPortal(resId);
+}
+
+function submitPaymentEntry(btn){
+  var payload = {
+    entryType: 'Payment',
+    resId: (document.getElementById('p_resId').value||'').trim(),
+    guestName: (document.getElementById('p_guestName').value||'').trim(),
+    roomNo: (document.getElementById('p_roomNo').value||'').trim(),
+    paymentType: document.getElementById('p_type').value,
+    amount: Number(document.getElementById('p_amount').value||0),
+    rrrNumber: (document.getElementById('p_rrr').value||'').trim(),
+    updatePaymentStatus: document.getElementById('p_payStatus').value,
+    txDate: document.getElementById('p_txDate').value,
+    note: (document.getElementById('p_note').value||'').trim()
+  };
+  if (!payload.resId) return toast('Reservation ID is required.','error');
+  if (!payload.amount || payload.amount <= 0) return toast('Enter a valid amount.','error');
+  if (!payload.txDate) return toast('Payment date is required.','error');
+
+  setBusy(btn,true);
+  google.script.run
+    .withSuccessHandler(function(res){
+      setBusy(btn,false);
+      if (!res||!res.ok){ toast(res?res.message:'Save failed','error'); return; }
+      toast('Payment record saved.','success');
+      document.getElementById('entryFormContainer').innerHTML='';
+    })
+    .withFailureHandler(function(err){
+      setBusy(btn,false);
+      toast((err&&err.message)||'Save failed','error');
+    })
+    .saveBackdatedEntry(payload);
+}
+
+/* ─────────────── 3. EXTENSION FORM ─────────── */
+function buildExtensionForm(){
+  return '<div class="card" id="form-extension">'+
+    '<div class="card-header"><div><h3>Backdated Stay Extension</h3><p>Record a stay extension with its original payment date.</p></div>'+
+    '<button class="btn btn-ghost btn-sm" onclick="document.getElementById(\'entryFormContainer\').innerHTML=\'\'">✕ Close</button></div>'+
+    '<div class="grid-2">'+
+      '<div class="field"><label>Reservation ID *</label><input id="e_resId" placeholder="RES0001" onblur="lookupResForExtension()"></div>'+
+      '<div class="field"><label>Guest Name</label><input id="e_guestName" placeholder="Auto-fills"></div>'+
+      '<div class="field"><label>Room No</label><input id="e_roomNo" placeholder="Auto-fills"></div>'+
+      '<div class="field"><label>Original Check Out</label><input id="e_oldCheckout" placeholder="Auto-fills" readonly></div>'+
+      '<div class="field"><label>New Check Out Date *</label><input id="e_newCheckout" type="date"></div>'+
+      '<div class="field"><label>Extension Amount (₦) *</label><input id="e_amount" type="number" min="0" placeholder="Amount paid for extension"></div>'+
+      '<div class="field"><label>RRR / Reference</label><input id="e_rrr" placeholder="Payment reference"></div>'+
+      '<div class="field"><label>Transaction Date *</label><input id="e_txDate" type="date"></div>'+
+      '<div class="field span-2"><label>Note</label><textarea id="e_note" placeholder="Optional note"></textarea></div>'+
+      '<div class="span-2 modal-footer"><button class="btn btn-gold" onclick="submitExtensionEntry(this)">Save Extension</button></div>'+
+    '</div>'+
+  '</div>';
+}
+
+function lookupResForExtension(){
+  var resId = (document.getElementById('e_resId').value||'').trim();
+  if (!resId) return;
+  google.script.run
+    .withSuccessHandler(function(res){
+      if (!res||!res.ok) return;
+      if (res.data){
+        var f = function(id,v){ var el=document.getElementById(id); if(el&&v!==undefined) el.value=v; };
+        f('e_guestName', res.data.guestName);
+        f('e_roomNo', res.data.roomNo);
+        f('e_oldCheckout', res.data.checkOut);
+      }
+    })
+    .withFailureHandler(function(){})
+    .lookupReservationForPortal(resId);
+}
+
+function submitExtensionEntry(btn){
+  var payload = {
+    entryType: 'Extension',
+    resId: (document.getElementById('e_resId').value||'').trim(),
+    guestName: (document.getElementById('e_guestName').value||'').trim(),
+    roomNo: (document.getElementById('e_roomNo').value||'').trim(),
+    newCheckOut: document.getElementById('e_newCheckout').value,
+    amount: Number(document.getElementById('e_amount').value||0),
+    rrrNumber: (document.getElementById('e_rrr').value||'').trim(),
+    txDate: document.getElementById('e_txDate').value,
+    note: (document.getElementById('e_note').value||'').trim()
+  };
+  if (!payload.resId) return toast('Reservation ID is required.','error');
+  if (!payload.newCheckOut) return toast('New check out date is required.','error');
+  if (!payload.txDate) return toast('Transaction date is required.','error');
+
+  setBusy(btn,true);
+  google.script.run
+    .withSuccessHandler(function(res){
+      setBusy(btn,false);
+      if (!res||!res.ok){ toast(res?res.message:'Save failed','error'); return; }
+      toast('Extension saved.','success');
+      document.getElementById('entryFormContainer').innerHTML='';
+    })
+    .withFailureHandler(function(err){
+      setBusy(btn,false);
+      toast((err&&err.message)||'Save failed','error');
+    })
+    .saveBackdatedEntry(payload);
+}
+
+/* ─────────────── 4. CHECKOUT FORM ──────────── */
+function buildCheckoutForm(){
+  return '<div class="card" id="form-checkout">'+
+    '<div class="card-header"><div><h3>Backdated Checkout</h3><p>Record a historical checkout for an existing reservation.</p></div>'+
+    '<button class="btn btn-ghost btn-sm" onclick="document.getElementById(\'entryFormContainer\').innerHTML=\'\'">✕ Close</button></div>'+
+    '<div class="grid-2">'+
+      '<div class="field"><label>Reservation ID *</label><input id="co_resId" placeholder="RES0001" onblur="lookupResForCheckout()"></div>'+
+      '<div class="field"><label>Guest Name</label><input id="co_guestName" placeholder="Auto-fills" readonly></div>'+
+      '<div class="field"><label>Room No</label><input id="co_roomNo" placeholder="Auto-fills" readonly></div>'+
+      '<div class="field"><label>Scheduled Check Out</label><input id="co_scheduled" placeholder="Auto-fills" readonly></div>'+
+      '<div class="field"><label>Actual Check Out Date/Time *</label><input id="co_actual" type="datetime-local"></div>'+
+      '<div class="field"><label>Final Payment Status</label><select id="co_payStatus">'+
+        '<option value="">— No change —</option>'+
+        '<option>Paid</option><option>Part Paid</option><option>Unpaid</option>'+
+      '</select></div>'+
+      '<div class="field"><label>Transaction Date *</label><input id="co_txDate" type="date"></div>'+
+      '<div class="field span-2"><label>Note</label><textarea id="co_note" placeholder="Optional note"></textarea></div>'+
+      '<div class="span-2 modal-footer"><button class="btn btn-gold" onclick="submitCheckoutEntry(this)">Save Checkout Record</button></div>'+
+    '</div>'+
+  '</div>';
+}
+
+function lookupResForCheckout(){
+  var resId = (document.getElementById('co_resId').value||'').trim();
+  if (!resId) return;
+  google.script.run
+    .withSuccessHandler(function(res){
+      if (!res||!res.ok) return;
+      if (res.data){
+        var f = function(id,v){ var el=document.getElementById(id); if(el&&v!==undefined) el.value=v; };
+        f('co_guestName', res.data.guestName);
+        f('co_roomNo', res.data.roomNo);
+        f('co_scheduled', res.data.checkOut);
+      }
+    })
+    .withFailureHandler(function(){})
+    .lookupReservationForPortal(resId);
+}
+
+function submitCheckoutEntry(btn){
+  var payload = {
+    entryType: 'Checkout',
+    resId: (document.getElementById('co_resId').value||'').trim(),
+    guestName: (document.getElementById('co_guestName').value||'').trim(),
+    roomNo: (document.getElementById('co_roomNo').value||'').trim(),
+    actualCheckout: document.getElementById('co_actual').value,
+    updatePaymentStatus: document.getElementById('co_payStatus').value,
+    txDate: document.getElementById('co_txDate').value,
+    note: (document.getElementById('co_note').value||'').trim()
+  };
+  if (!payload.resId) return toast('Reservation ID is required.','error');
+  if (!payload.actualCheckout) return toast('Actual checkout date/time is required.','error');
+  if (!payload.txDate) return toast('Transaction date is required.','error');
+
+  setBusy(btn,true);
+  google.script.run
+    .withSuccessHandler(function(res){
+      setBusy(btn,false);
+      if (!res||!res.ok){ toast(res?res.message:'Save failed','error'); return; }
+      toast('Checkout record saved.','success');
+      document.getElementById('entryFormContainer').innerHTML='';
+    })
+    .withFailureHandler(function(err){
+      setBusy(btn,false);
+      toast((err&&err.message)||'Save failed','error');
+    })
+    .saveBackdatedEntry(payload);
+}
+
+/* ─────────────── 5. LATE CHECKOUT FORM ─────── */
+function buildLateCheckoutForm(){
+  return '<div class="card" id="form-latecheckout">'+
+    '<div class="card-header"><div><h3>Backdated Late Checkout Fee</h3><p>Record a historical late checkout fee payment.</p></div>'+
+    '<button class="btn btn-ghost btn-sm" onclick="document.getElementById(\'entryFormContainer\').innerHTML=\'\'">✕ Close</button></div>'+
+    '<div class="grid-2">'+
+      '<div class="field"><label>Reservation ID *</label><input id="lc_resId" placeholder="RES0001" onblur="lookupResForLateCheckout()"></div>'+
+      '<div class="field"><label>Guest Name</label><input id="lc_guestName" placeholder="Auto-fills" readonly></div>'+
+      '<div class="field"><label>Room No</label><input id="lc_roomNo" placeholder="Auto-fills" readonly></div>'+
+      '<div class="field"><label>Late Checkout Fee (₦) *</label><input id="lc_amount" type="number" min="0" placeholder="Fee amount"></div>'+
+      '<div class="field"><label>RRR / Reference</label><input id="lc_rrr" placeholder="Payment reference"></div>'+
+      '<div class="field"><label>Transaction Date *</label><input id="lc_txDate" type="date"></div>'+
+      '<div class="field span-2"><label>Note</label><textarea id="lc_note" placeholder="Optional note"></textarea></div>'+
+      '<div class="span-2 modal-footer"><button class="btn btn-gold" onclick="submitLateCheckoutEntry(this)">Save Late Checkout Fee</button></div>'+
+    '</div>'+
+  '</div>';
+}
+
+function lookupResForLateCheckout(){
+  var resId = (document.getElementById('lc_resId').value||'').trim();
+  if (!resId) return;
+  google.script.run
+    .withSuccessHandler(function(res){
+      if (!res||!res.ok) return;
+      if (res.data){
+        var f = function(id,v){ var el=document.getElementById(id); if(el&&v!==undefined) el.value=v; };
+        f('lc_guestName', res.data.guestName);
+        f('lc_roomNo', res.data.roomNo);
+      }
+    })
+    .withFailureHandler(function(){})
+    .lookupReservationForPortal(resId);
+}
+
+function submitLateCheckoutEntry(btn){
+  var payload = {
+    entryType: 'Late Checkout',
+    resId: (document.getElementById('lc_resId').value||'').trim(),
+    guestName: (document.getElementById('lc_guestName').value||'').trim(),
+    roomNo: (document.getElementById('lc_roomNo').value||'').trim(),
+    amount: Number(document.getElementById('lc_amount').value||0),
+    rrrNumber: (document.getElementById('lc_rrr').value||'').trim(),
+    txDate: document.getElementById('lc_txDate').value,
+    note: (document.getElementById('lc_note').value||'').trim()
+  };
+  if (!payload.resId) return toast('Reservation ID is required.','error');
+  if (!payload.amount || payload.amount <= 0) return toast('Enter a valid fee amount.','error');
+  if (!payload.txDate) return toast('Transaction date is required.','error');
+
+  setBusy(btn,true);
+  google.script.run
+    .withSuccessHandler(function(res){
+      setBusy(btn,false);
+      if (!res||!res.ok){ toast(res?res.message:'Save failed','error'); return; }
+      toast('Late checkout fee saved.','success');
+      document.getElementById('entryFormContainer').innerHTML='';
+    })
+    .withFailureHandler(function(err){
+      setBusy(btn,false);
+      toast((err&&err.message)||'Save failed','error');
+    })
+    .saveBackdatedEntry(payload);
+}
+
+/* ═══════════════════════════════════════════════════
+   HELPERS
+═══════════════════════════════════════════════════ */
+function nightsBetween(ci, co){
+  if (!ci||!co) return 0;
+  var s = new Date(ci), e = new Date(co);
+  if (isNaN(s)||isNaN(e)) return 0;
+  return Math.max(0, Math.round((e-s)/86400000));
+}
+function getRoomRate(roomNo){
+  var ap = PORTAL.rooms.find(function(r){ return r.apartmentGroup===roomNo; });
+  if (ap) return APARTMENT_RATE;
+  var rm = PORTAL.rooms.find(function(r){ return r.roomNo===roomNo; });
+  return rm ? Number(rm.rate||0) : 0;
+}
+function isFreePr(ps){ var v=(ps||'').toLowerCase(); return v==='free/pr'||v==='free'||v==='pr'; }
+function fmt(n){ return Number(n||0).toLocaleString(); }
+function fmtMoney(n){ return n!==undefined&&n!==null&&n!=='' ? '₦'+fmt(n) : '—'; }
+function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
+function ea(s){ return esc(s); }
+function setBusy(btn,busy){
+  if(!btn) return;
+  if(!btn._lbl) btn._lbl=btn.textContent;
+  btn.disabled=busy;
+  btn.innerHTML=busy?'<span class="loading-spinner"></span> Saving…':btn._lbl;
+}
+function toast(msg,type){
+  var stack=document.getElementById('toastStack');
+  var t=document.createElement('div');
+  t.className='toast '+(type||'success');
+  t.textContent=msg;
+  stack.appendChild(t);
+  setTimeout(function(){ t.remove(); },3800);
+}
+</script>
+</body>
+</html>
