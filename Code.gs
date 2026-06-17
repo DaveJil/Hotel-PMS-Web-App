@@ -106,6 +106,10 @@ function doPost(e) {
   }
 }
 
+function getPortalUrl() {
+  return ScriptApp.getService().getUrl() + '?portal=backdated';
+}
+
 function normalizeDateOnly_(value) {
   const d = new Date(value);
   if (isNaN(d.getTime())) return null;

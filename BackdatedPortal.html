@@ -597,401 +597,570 @@ function loadSummary(){
 function showEntryForm(type){
   var c = document.getElementById('entryFormContainer');
   c.innerHTML = '';
-  if (type === 'reservation')   c.innerHTML = buildReservationForm();
-  else if (type === 'payment')  c.innerHTML = buildPaymentForm();
-  else if (type === 'extension') c.innerHTML = buildExtensionForm();
-  else if (type === 'checkout') c.innerHTML = buildCheckoutForm();
-  else if (type === 'latecheckout') c.innerHTML = buildLateCheckoutForm();
+  if      (type === 'reservation')   c.innerHTML = buildReservationForm();
+  else if (type === 'payment')       c.innerHTML = buildPaymentForm();
+  else if (type === 'extension')     c.innerHTML = buildExtensionForm();
+  else if (type === 'checkout')      c.innerHTML = buildCheckoutForm();
+  else if (type === 'latecheckout')  c.innerHTML = buildLateCheckoutForm();
   c.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
-/* ─────────────── ROOM OPTIONS ──────────────── */
-function roomOptions(selectedVal){
-  var seen = {};
-  var opts = [];
+function closeForm(){ document.getElementById('entryFormContainer').innerHTML = ''; }
 
+/* ─────────────── ROOM OPTIONS ──────────────── */
+function roomOptions(){
+  var seen = {}, opts = [];
   PORTAL.rooms.forEach(function(r){
     if (r.apartmentGroup && !seen[r.apartmentGroup]){
       seen[r.apartmentGroup] = true;
-      var sel = (selectedVal === r.apartmentGroup) ? ' selected' : '';
-      opts.push('<option value="'+ea(r.apartmentGroup)+'"'+sel+'>'+esc(r.apartmentGroup)+' - Apartment - ₦'+fmt(APARTMENT_RATE)+'</option>');
+      opts.push('<option value="'+ea(r.apartmentGroup)+'">'+esc(r.apartmentGroup)+' - Apartment - ₦'+fmt(APARTMENT_RATE)+'</option>');
     }
   });
   PORTAL.rooms.forEach(function(r){
-    var sel = (selectedVal === r.roomNo) ? ' selected' : '';
-    opts.push('<option value="'+ea(r.roomNo)+'"'+sel+'>'+esc(r.roomNo)+' - '+esc(r.roomType)+' - ₦'+fmt(r.rate)+'</option>');
+    opts.push('<option value="'+ea(r.roomNo)+'">'+esc(r.roomNo)+' - '+esc(r.roomType)+' - ₦'+fmt(r.rate)+'</option>');
   });
   return opts.join('');
 }
 
 function channelOptions(){
-  return PORTAL.channels.map(function(c){ return '<option value="'+ea(c)+'">'+esc(c)+'</option>'; }).join('');
+  return PORTAL.channels.map(function(c){
+    return '<option value="'+ea(c)+'">'+esc(c)+'</option>';
+  }).join('');
 }
 
-/* ─────────────── 1. RESERVATION FORM ──────── */
+/* ── Shared lookup helper ── */
+function fillFields(map){
+  Object.keys(map).forEach(function(id){
+    var el = document.getElementById(id);
+    if (el && map[id] !== undefined && map[id] !== null) el.value = map[id];
+  });
+}
+
+function lookupRes(resIdElId, callback){
+  var resId = (document.getElementById(resIdElId).value || '').trim().toUpperCase();
+  if (!resId) return;
+  // Normalise — user may type "res0001" lowercase
+  document.getElementById(resIdElId).value = resId;
+
+  google.script.run
+    .withSuccessHandler(function(res){
+      if (!res || !res.ok){
+        toast('Reservation "' + resId + '" not found.', 'error');
+        return;
+      }
+      callback(res.data);
+    })
+    .withFailureHandler(function(err){
+      toast((err && err.message) || 'Lookup failed.', 'error');
+    })
+    .lookupReservationForPortal(resId);
+}
+
+/* ═══════════════════════════════════════════════════
+   1. RESERVATION FORM
+   — No Res ID field. ID is auto-generated server-side.
+   — No Pay ID field. Generated server-side on save.
+═══════════════════════════════════════════════════ */
 function buildReservationForm(){
   return '<div class="card" id="form-reservation">'+
-    '<div class="card-header"><div><h3>Backdated Reservation + Payment</h3><p>Creates a booking history record, room entry, and payment record with the original transaction date.</p></div>'+
-    '<button class="btn btn-ghost btn-sm" onclick="document.getElementById(\'entryFormContainer\').innerHTML=\'\'">✕ Close</button></div>'+
+    '<div class="card-header">'+
+      '<div><h3>Backdated Reservation + Payment</h3>'+
+      '<p>Res ID and Pay ID are auto-generated on save.</p></div>'+
+      '<button class="btn btn-ghost btn-sm" onclick="closeForm()">✕ Close</button>'+
+    '</div>'+
     '<div class="grid-2">'+
-      '<div class="field"><label>Guest Name *</label><input id="r_guestName" placeholder="Full name"></div>'+
-      '<div class="field"><label>Phone</label><input id="r_phone" placeholder="+234…"></div>'+
-      '<div class="field"><label>Email</label><input id="r_email" type="email" placeholder="guest@email.com"></div>'+
-      '<div class="field"><label>Room / Apartment *</label><select id="r_room" onchange="updateResPreview()">'+roomOptions()+'</select></div>'+
-      '<div class="field"><label>Check In Date *</label><input id="r_checkIn" type="date" onchange="updateResPreview()"></div>'+
-      '<div class="field"><label>Check Out Date *</label><input id="r_checkOut" type="date" onchange="updateResPreview()"></div>'+
-      '<div class="field"><label>Adults</label><input id="r_adults" type="number" value="1" min="1" max="2"></div>'+
-      '<div class="field"><label>Channel</label><select id="r_channel">'+channelOptions()+'</select></div>'+
-      '<div class="field"><label>Discount %</label><input id="r_discount" type="number" value="0" min="0" max="100" onchange="updateResPreview()"></div>'+
-      '<div class="field"><label>Payment Status</label><select id="r_payStatus" onchange="updateResPreview()">'+
-        '<option>Paid</option><option>Part Paid</option><option>Unpaid</option><option>Free/PR</option>'+
-      '</select></div>'+
-      '<div class="field"><label>Reservation Status</label><select id="r_status">'+
-        '<option value="Checked Out">Checked Out</option>'+
-        '<option value="Checked In">Checked In</option>'+
-        '<option value="Reserved">Reserved</option>'+
-        '<option value="Cancelled">Cancelled</option>'+
-      '</select></div>'+
-      '<div class="field"><label>RRR / Reference No.</label><input id="r_rrr" placeholder="Payment reference"></div>'+
-      '<div class="field"><label>Original Transaction Date *</label><input id="r_txDate" type="date"></div>'+
-      '<div class="field"><label>Actual Check Out (if checked out)</label><input id="r_actualCheckout" type="datetime-local"></div>'+
-      '<div class="field span-2"><label>Notes</label><textarea id="r_notes" placeholder="Any additional notes"></textarea></div>'+
-      '<div class="span-2" id="resPreviewBox" style="background:var(--surface-2);border:1px solid var(--border);border-radius:10px;padding:14px;font-size:.85rem;color:var(--muted)">Select dates and room to see price preview.</div>'+
-      '<div class="span-2 modal-footer"><button class="btn btn-gold" onclick="submitReservationEntry(this)">Save Backdated Reservation</button></div>'+
+
+      '<div class="field"><label>Guest Name *</label>'+
+        '<input id="r_guestName" placeholder="Full name"></div>'+
+
+      '<div class="field"><label>Phone</label>'+
+        '<input id="r_phone" placeholder="+234…"></div>'+
+
+      '<div class="field"><label>Email</label>'+
+        '<input id="r_email" type="email" placeholder="guest@email.com"></div>'+
+
+      '<div class="field"><label>Room / Apartment *</label>'+
+        '<select id="r_room" onchange="updateResPreview()">'+roomOptions()+'</select></div>'+
+
+      '<div class="field"><label>Check In Date *</label>'+
+        '<input id="r_checkIn" type="date" onchange="updateResPreview()"></div>'+
+
+      '<div class="field"><label>Check Out Date *</label>'+
+        '<input id="r_checkOut" type="date" onchange="updateResPreview()"></div>'+
+
+      '<div class="field"><label>Adults</label>'+
+        '<input id="r_adults" type="number" value="1" min="1" max="2"></div>'+
+
+      '<div class="field"><label>Channel</label>'+
+        '<select id="r_channel">'+channelOptions()+'</select></div>'+
+
+      '<div class="field"><label>Discount %</label>'+
+        '<input id="r_discount" type="number" value="0" min="0" max="100" onchange="updateResPreview()"></div>'+
+
+      '<div class="field"><label>Payment Status</label>'+
+        '<select id="r_payStatus" onchange="updateResPreview()">'+
+          '<option>Paid</option><option>Part Paid</option>'+
+          '<option>Unpaid</option><option>Free/PR</option>'+
+        '</select></div>'+
+
+      '<div class="field"><label>Reservation Status</label>'+
+        '<select id="r_status">'+
+          '<option value="Checked Out">Checked Out</option>'+
+          '<option value="Checked In">Checked In</option>'+
+          '<option value="Reserved">Reserved</option>'+
+          '<option value="Cancelled">Cancelled</option>'+
+        '</select></div>'+
+
+      '<div class="field"><label>RRR / Reference No.</label>'+
+        '<input id="r_rrr" placeholder="Payment reference"></div>'+
+
+      '<div class="field"><label>Original Transaction Date *</label>'+
+        '<input id="r_txDate" type="date"></div>'+
+
+      '<div class="field"><label>Actual Check Out (if checked out)</label>'+
+        '<input id="r_actualCheckout" type="datetime-local"></div>'+
+
+      '<div class="field span-2"><label>Notes</label>'+
+        '<textarea id="r_notes" placeholder="Any additional notes"></textarea></div>'+
+
+      '<div class="span-2" id="resPreviewBox" style="background:var(--surface-2);border:1px solid var(--border);border-radius:10px;padding:14px;font-size:.85rem;color:var(--muted)">'+
+        'Select a room and dates to see price preview.</div>'+
+
+      '<div class="span-2 modal-footer">'+
+        '<button class="btn btn-gold" onclick="submitReservationEntry(this)">Save Backdated Reservation</button>'+
+      '</div>'+
     '</div>'+
   '</div>';
 }
 
 function updateResPreview(){
   var room = document.getElementById('r_room');
-  var ci = document.getElementById('r_checkIn');
-  var co = document.getElementById('r_checkOut');
+  var ci   = document.getElementById('r_checkIn');
+  var co   = document.getElementById('r_checkOut');
   var disc = document.getElementById('r_discount');
-  var ps = document.getElementById('r_payStatus');
-  var box = document.getElementById('resPreviewBox');
+  var ps   = document.getElementById('r_payStatus');
+  var box  = document.getElementById('resPreviewBox');
   if (!room || !ci || !co || !box) return;
 
   var nights = nightsBetween(ci.value, co.value);
-  var rate = getRoomRate(room.value);
+  var rate   = getRoomRate(room.value);
   var isFree = isFreePr(ps ? ps.value : '');
-  var gross = isFree ? 0 : rate * nights;
-  var net = isFree ? 0 : Math.round(gross * (1 - Number(disc ? disc.value : 0)/100));
+  var net    = isFree ? 0 : Math.round(rate * nights * (1 - Number(disc ? disc.value : 0) / 100));
 
-  box.innerHTML = '<strong style="color:var(--gold)">Price Preview</strong> &nbsp;|&nbsp; Rate: ₦'+fmt(rate)+'/night &nbsp;|&nbsp; Nights: '+nights+' &nbsp;|&nbsp; <strong style="color:var(--text)">Total: ₦'+fmt(net)+'</strong>';
+  box.innerHTML =
+    '<strong style="color:var(--gold)">Price Preview</strong>' +
+    ' &nbsp;|&nbsp; Rate: ₦' + fmt(rate) + '/night' +
+    ' &nbsp;|&nbsp; Nights: ' + nights +
+    ' &nbsp;|&nbsp; <strong style="color:var(--text)">Total: ₦' + fmt(net) + '</strong>';
 }
 
 function submitReservationEntry(btn){
   var payload = {
-    entryType: 'Reservation',
-    guestName: (document.getElementById('r_guestName').value||'').trim(),
-    phone: (document.getElementById('r_phone').value||'').trim(),
-    email: (document.getElementById('r_email').value||'').trim(),
-    roomNo: document.getElementById('r_room').value,
-    checkIn: document.getElementById('r_checkIn').value,
-    checkOut: document.getElementById('r_checkOut').value,
-    adults: Number(document.getElementById('r_adults').value||1),
-    channel: document.getElementById('r_channel').value,
-    discountPct: Number(document.getElementById('r_discount').value||0),
-    paymentStatus: document.getElementById('r_payStatus').value,
-    reservationStatus: document.getElementById('r_status').value,
-    rrrNumber: (document.getElementById('r_rrr').value||'').trim(),
-    txDate: document.getElementById('r_txDate').value,
-    actualCheckout: (document.getElementById('r_actualCheckout').value||'').trim(),
-    notes: (document.getElementById('r_notes').value||'').trim()
+    entryType:         'Reservation',
+    guestName:         (document.getElementById('r_guestName').value   || '').trim(),
+    phone:             (document.getElementById('r_phone').value        || '').trim(),
+    email:             (document.getElementById('r_email').value        || '').trim(),
+    roomNo:             document.getElementById('r_room').value,
+    checkIn:            document.getElementById('r_checkIn').value,
+    checkOut:           document.getElementById('r_checkOut').value,
+    adults:            Number(document.getElementById('r_adults').value  || 1),
+    channel:            document.getElementById('r_channel').value,
+    discountPct:       Number(document.getElementById('r_discount').value || 0),
+    paymentStatus:      document.getElementById('r_payStatus').value,
+    reservationStatus:  document.getElementById('r_status').value,
+    rrrNumber:         (document.getElementById('r_rrr').value           || '').trim(),
+    txDate:             document.getElementById('r_txDate').value,
+    actualCheckout:    (document.getElementById('r_actualCheckout').value || '').trim(),
+    notes:             (document.getElementById('r_notes').value          || '').trim()
+    // resId intentionally omitted — server generates it
+    // payId intentionally omitted — server generates it
   };
-  if (!payload.guestName) return toast('Guest name is required.','error');
-  if (!payload.roomNo) return toast('Select a room.','error');
-  if (!payload.checkIn || !payload.checkOut) return toast('Check-in and check-out dates required.','error');
-  if (!payload.txDate) return toast('Original transaction date is required.','error');
 
-  setBusy(btn,true);
+  if (!payload.guestName)                return toast('Guest name is required.', 'error');
+  if (!payload.roomNo)                   return toast('Select a room or apartment.', 'error');
+  if (!payload.checkIn || !payload.checkOut) return toast('Check-in and check-out dates are required.', 'error');
+  if (!payload.txDate)                   return toast('Original transaction date is required.', 'error');
+
+  setBusy(btn, true);
   google.script.run
     .withSuccessHandler(function(res){
-      setBusy(btn,false);
-      if (!res||!res.ok){ toast(res?res.message:'Save failed','error'); return; }
-      toast('Reservation entry saved and synced to reports.','success');
-      document.getElementById('entryFormContainer').innerHTML='';
+      setBusy(btn, false);
+      if (!res || !res.ok){ toast(res ? res.message : 'Save failed', 'error'); return; }
+      toast('Reservation saved. Res ID: ' + res.resId, 'success');
+      closeForm();
     })
     .withFailureHandler(function(err){
-      setBusy(btn,false);
-      toast((err&&err.message)||'Save failed','error');
+      setBusy(btn, false);
+      toast((err && err.message) || 'Save failed', 'error');
     })
     .saveBackdatedEntry(payload);
 }
 
-/* ─────────────── 2. PAYMENT FORM ──────────── */
+/* ═══════════════════════════════════════════════════
+   2. PAYMENT FORM
+   — Staff enter Res ID to look up the reservation.
+   — Pay ID is auto-generated server-side; never shown.
+═══════════════════════════════════════════════════ */
 function buildPaymentForm(){
   return '<div class="card" id="form-payment">'+
-    '<div class="card-header"><div><h3>Backdated Payment</h3><p>Add a payment record to an existing reservation. Shows in Payment History and financial reports.</p></div>'+
-    '<button class="btn btn-ghost btn-sm" onclick="document.getElementById(\'entryFormContainer\').innerHTML=\'\'">✕ Close</button></div>'+
+    '<div class="card-header">'+
+      '<div><h3>Backdated Payment</h3>'+
+      '<p>Enter the Reservation ID to look up the guest, then fill in payment details. Pay ID is auto-generated.</p></div>'+
+      '<button class="btn btn-ghost btn-sm" onclick="closeForm()">✕ Close</button>'+
+    '</div>'+
     '<div class="grid-2">'+
-      '<div class="field"><label>Reservation ID *</label><input id="p_resId" placeholder="RES0001" onblur="lookupResForPayment()"></div>'+
-      '<div class="field"><label>Guest Name</label><input id="p_guestName" placeholder="Auto-fills on lookup"></div>'+
-      '<div class="field"><label>Room No</label><input id="p_roomNo" placeholder="Auto-fills"></div>'+
-      '<div class="field"><label>Payment Type *</label><select id="p_type">'+
-        '<option>Reservation Payment</option>'+
-        '<option>Extension Payment</option>'+
-        '<option>Late Checkout Payment</option>'+
-        '<option>Other</option>'+
-      '</select></div>'+
-      '<div class="field"><label>Amount (₦) *</label><input id="p_amount" type="number" min="0" placeholder="0.00"></div>'+
-      '<div class="field"><label>RRR / Reference *</label><input id="p_rrr" placeholder="Payment reference"></div>'+
-      '<div class="field"><label>Update Payment Status To</label><select id="p_payStatus">'+
-        '<option value="">— No change —</option>'+
-        '<option>Paid</option><option>Part Paid</option>'+
-      '</select></div>'+
-      '<div class="field"><label>Payment Date *</label><input id="p_txDate" type="date"></div>'+
-      '<div class="field span-2"><label>Note</label><textarea id="p_note" placeholder="Optional note"></textarea></div>'+
-      '<div class="span-2 modal-footer"><button class="btn btn-gold" onclick="submitPaymentEntry(this)">Save Payment Record</button></div>'+
+
+      '<div class="field span-2">'+
+        '<label>Reservation ID *</label>'+
+        '<div style="display:flex;gap:8px">'+
+          '<input id="p_resId" placeholder="e.g. RES0001 — type and click Look Up" style="flex:1">'+
+          '<button class="btn btn-ghost" onclick="lookupRes(\'p_resId\', fillPaymentFromLookup)">Look Up</button>'+
+        '</div>'+
+      '</div>'+
+
+      '<div class="field"><label>Guest Name</label>'+
+        '<input id="p_guestName" placeholder="Auto-fills after lookup" readonly></div>'+
+
+      '<div class="field"><label>Room No</label>'+
+        '<input id="p_roomNo" placeholder="Auto-fills after lookup" readonly></div>'+
+
+      '<div class="field"><label>Payment Type *</label>'+
+        '<select id="p_type">'+
+          '<option>Reservation Payment</option>'+
+          '<option>Extension Payment</option>'+
+          '<option>Late Checkout Payment</option>'+
+          '<option>Other</option>'+
+        '</select></div>'+
+
+      '<div class="field"><label>Amount (₦) *</label>'+
+        '<input id="p_amount" type="number" min="0" placeholder="0.00"></div>'+
+
+      '<div class="field"><label>RRR / Reference</label>'+
+        '<input id="p_rrr" placeholder="Payment reference"></div>'+
+
+      '<div class="field"><label>Update Payment Status To</label>'+
+        '<select id="p_payStatus">'+
+          '<option value="">— No change —</option>'+
+          '<option>Paid</option><option>Part Paid</option>'+
+        '</select></div>'+
+
+      '<div class="field"><label>Payment Date *</label>'+
+        '<input id="p_txDate" type="date"></div>'+
+
+      '<div class="field span-2"><label>Note</label>'+
+        '<textarea id="p_note" placeholder="Optional note"></textarea></div>'+
+
+      '<div class="span-2 modal-footer">'+
+        '<button class="btn btn-gold" onclick="submitPaymentEntry(this)">Save Payment Record</button>'+
+      '</div>'+
     '</div>'+
   '</div>';
 }
 
-function lookupResForPayment(){
-  var resId = (document.getElementById('p_resId').value||'').trim();
-  if (!resId) return;
-  google.script.run
-    .withSuccessHandler(function(res){
-      if (!res||!res.ok) return;
-      if (res.data){
-        var f = function(id,v){ var el=document.getElementById(id); if(el&&v) el.value=v; };
-        f('p_guestName', res.data.guestName);
-        f('p_roomNo', res.data.roomNo);
-      }
-    })
-    .withFailureHandler(function(){})
-    .lookupReservationForPortal(resId);
+function fillPaymentFromLookup(data){
+  fillFields({ p_guestName: data.guestName, p_roomNo: data.roomNo });
+  toast('Reservation found: ' + data.guestName + ' — ' + data.roomNo, 'success');
 }
 
 function submitPaymentEntry(btn){
-  var payload = {
-    entryType: 'Payment',
-    resId: (document.getElementById('p_resId').value||'').trim(),
-    guestName: (document.getElementById('p_guestName').value||'').trim(),
-    roomNo: (document.getElementById('p_roomNo').value||'').trim(),
-    paymentType: document.getElementById('p_type').value,
-    amount: Number(document.getElementById('p_amount').value||0),
-    rrrNumber: (document.getElementById('p_rrr').value||'').trim(),
-    updatePaymentStatus: document.getElementById('p_payStatus').value,
-    txDate: document.getElementById('p_txDate').value,
-    note: (document.getElementById('p_note').value||'').trim()
-  };
-  if (!payload.resId) return toast('Reservation ID is required.','error');
-  if (!payload.amount || payload.amount <= 0) return toast('Enter a valid amount.','error');
-  if (!payload.txDate) return toast('Payment date is required.','error');
+  var resId = (document.getElementById('p_resId').value || '').trim();
+  if (!resId) return toast('Enter and look up a Reservation ID first.', 'error');
+  var amount = Number(document.getElementById('p_amount').value || 0);
+  if (!amount || amount <= 0) return toast('Enter a valid amount.', 'error');
+  var txDate = document.getElementById('p_txDate').value;
+  if (!txDate) return toast('Payment date is required.', 'error');
 
-  setBusy(btn,true);
+  var payload = {
+    entryType:           'Payment',
+    resId:                resId,
+    guestName:           (document.getElementById('p_guestName').value || '').trim(),
+    roomNo:              (document.getElementById('p_roomNo').value    || '').trim(),
+    paymentType:          document.getElementById('p_type').value,
+    amount:               amount,
+    rrrNumber:           (document.getElementById('p_rrr').value       || '').trim(),
+    updatePaymentStatus:  document.getElementById('p_payStatus').value,
+    txDate:               txDate,
+    note:                (document.getElementById('p_note').value      || '').trim()
+    // payId intentionally omitted — server generates it
+  };
+
+  setBusy(btn, true);
   google.script.run
     .withSuccessHandler(function(res){
-      setBusy(btn,false);
-      if (!res||!res.ok){ toast(res?res.message:'Save failed','error'); return; }
-      toast('Payment record saved.','success');
-      document.getElementById('entryFormContainer').innerHTML='';
+      setBusy(btn, false);
+      if (!res || !res.ok){ toast(res ? res.message : 'Save failed', 'error'); return; }
+      toast('Payment saved. Pay ID: ' + res.entryId, 'success');
+      closeForm();
     })
     .withFailureHandler(function(err){
-      setBusy(btn,false);
-      toast((err&&err.message)||'Save failed','error');
+      setBusy(btn, false);
+      toast((err && err.message) || 'Save failed', 'error');
     })
     .saveBackdatedEntry(payload);
 }
 
-/* ─────────────── 3. EXTENSION FORM ─────────── */
+/* ═══════════════════════════════════════════════════
+   3. EXTENSION FORM
+   — Staff enter Res ID to look up existing reservation.
+   — Pay ID auto-generated server-side.
+═══════════════════════════════════════════════════ */
 function buildExtensionForm(){
   return '<div class="card" id="form-extension">'+
-    '<div class="card-header"><div><h3>Backdated Stay Extension</h3><p>Record a stay extension with its original payment date.</p></div>'+
-    '<button class="btn btn-ghost btn-sm" onclick="document.getElementById(\'entryFormContainer\').innerHTML=\'\'">✕ Close</button></div>'+
+    '<div class="card-header">'+
+      '<div><h3>Backdated Stay Extension</h3>'+
+      '<p>Look up the reservation, then enter the new checkout date and payment details.</p></div>'+
+      '<button class="btn btn-ghost btn-sm" onclick="closeForm()">✕ Close</button>'+
+    '</div>'+
     '<div class="grid-2">'+
-      '<div class="field"><label>Reservation ID *</label><input id="e_resId" placeholder="RES0001" onblur="lookupResForExtension()"></div>'+
-      '<div class="field"><label>Guest Name</label><input id="e_guestName" placeholder="Auto-fills"></div>'+
-      '<div class="field"><label>Room No</label><input id="e_roomNo" placeholder="Auto-fills"></div>'+
-      '<div class="field"><label>Original Check Out</label><input id="e_oldCheckout" placeholder="Auto-fills" readonly></div>'+
-      '<div class="field"><label>New Check Out Date *</label><input id="e_newCheckout" type="date"></div>'+
-      '<div class="field"><label>Extension Amount (₦) *</label><input id="e_amount" type="number" min="0" placeholder="Amount paid for extension"></div>'+
-      '<div class="field"><label>RRR / Reference</label><input id="e_rrr" placeholder="Payment reference"></div>'+
-      '<div class="field"><label>Transaction Date *</label><input id="e_txDate" type="date"></div>'+
-      '<div class="field span-2"><label>Note</label><textarea id="e_note" placeholder="Optional note"></textarea></div>'+
-      '<div class="span-2 modal-footer"><button class="btn btn-gold" onclick="submitExtensionEntry(this)">Save Extension</button></div>'+
+
+      '<div class="field span-2">'+
+        '<label>Reservation ID *</label>'+
+        '<div style="display:flex;gap:8px">'+
+          '<input id="e_resId" placeholder="e.g. RES0001" style="flex:1">'+
+          '<button class="btn btn-ghost" onclick="lookupRes(\'e_resId\', fillExtensionFromLookup)">Look Up</button>'+
+        '</div>'+
+      '</div>'+
+
+      '<div class="field"><label>Guest Name</label>'+
+        '<input id="e_guestName" placeholder="Auto-fills after lookup" readonly></div>'+
+
+      '<div class="field"><label>Room No</label>'+
+        '<input id="e_roomNo" placeholder="Auto-fills after lookup" readonly></div>'+
+
+      '<div class="field"><label>Current Check Out</label>'+
+        '<input id="e_oldCheckout" placeholder="Auto-fills after lookup" readonly></div>'+
+
+      '<div class="field"><label>New Check Out Date *</label>'+
+        '<input id="e_newCheckout" type="date"></div>'+
+
+      '<div class="field"><label>Extension Amount (₦)</label>'+
+        '<input id="e_amount" type="number" min="0" placeholder="Amount paid for extension"></div>'+
+
+      '<div class="field"><label>RRR / Reference</label>'+
+        '<input id="e_rrr" placeholder="Payment reference"></div>'+
+
+      '<div class="field"><label>Transaction Date *</label>'+
+        '<input id="e_txDate" type="date"></div>'+
+
+      '<div class="field span-2"><label>Note</label>'+
+        '<textarea id="e_note" placeholder="Optional note"></textarea></div>'+
+
+      '<div class="span-2 modal-footer">'+
+        '<button class="btn btn-gold" onclick="submitExtensionEntry(this)">Save Extension</button>'+
+      '</div>'+
     '</div>'+
   '</div>';
 }
 
-function lookupResForExtension(){
-  var resId = (document.getElementById('e_resId').value||'').trim();
-  if (!resId) return;
-  google.script.run
-    .withSuccessHandler(function(res){
-      if (!res||!res.ok) return;
-      if (res.data){
-        var f = function(id,v){ var el=document.getElementById(id); if(el&&v!==undefined) el.value=v; };
-        f('e_guestName', res.data.guestName);
-        f('e_roomNo', res.data.roomNo);
-        f('e_oldCheckout', res.data.checkOut);
-      }
-    })
-    .withFailureHandler(function(){})
-    .lookupReservationForPortal(resId);
+function fillExtensionFromLookup(data){
+  fillFields({ e_guestName: data.guestName, e_roomNo: data.roomNo, e_oldCheckout: data.checkOut });
+  toast('Reservation found: ' + data.guestName + ' — checkout ' + data.checkOut, 'success');
 }
 
 function submitExtensionEntry(btn){
-  var payload = {
-    entryType: 'Extension',
-    resId: (document.getElementById('e_resId').value||'').trim(),
-    guestName: (document.getElementById('e_guestName').value||'').trim(),
-    roomNo: (document.getElementById('e_roomNo').value||'').trim(),
-    newCheckOut: document.getElementById('e_newCheckout').value,
-    amount: Number(document.getElementById('e_amount').value||0),
-    rrrNumber: (document.getElementById('e_rrr').value||'').trim(),
-    txDate: document.getElementById('e_txDate').value,
-    note: (document.getElementById('e_note').value||'').trim()
-  };
-  if (!payload.resId) return toast('Reservation ID is required.','error');
-  if (!payload.newCheckOut) return toast('New check out date is required.','error');
-  if (!payload.txDate) return toast('Transaction date is required.','error');
+  var resId = (document.getElementById('e_resId').value || '').trim();
+  if (!resId)                                         return toast('Enter and look up a Reservation ID first.', 'error');
+  if (!document.getElementById('e_newCheckout').value) return toast('New check out date is required.', 'error');
+  if (!document.getElementById('e_txDate').value)      return toast('Transaction date is required.', 'error');
 
-  setBusy(btn,true);
+  var payload = {
+    entryType:   'Extension',
+    resId:        resId,
+    guestName:   (document.getElementById('e_guestName').value   || '').trim(),
+    roomNo:      (document.getElementById('e_roomNo').value       || '').trim(),
+    newCheckOut:  document.getElementById('e_newCheckout').value,
+    amount:      Number(document.getElementById('e_amount').value || 0),
+    rrrNumber:   (document.getElementById('e_rrr').value          || '').trim(),
+    txDate:       document.getElementById('e_txDate').value,
+    note:        (document.getElementById('e_note').value         || '').trim()
+  };
+
+  setBusy(btn, true);
   google.script.run
     .withSuccessHandler(function(res){
-      setBusy(btn,false);
-      if (!res||!res.ok){ toast(res?res.message:'Save failed','error'); return; }
-      toast('Extension saved.','success');
-      document.getElementById('entryFormContainer').innerHTML='';
+      setBusy(btn, false);
+      if (!res || !res.ok){ toast(res ? res.message : 'Save failed', 'error'); return; }
+      toast('Extension saved.' + (res.entryId ? ' Pay ID: ' + res.entryId : ''), 'success');
+      closeForm();
     })
     .withFailureHandler(function(err){
-      setBusy(btn,false);
-      toast((err&&err.message)||'Save failed','error');
+      setBusy(btn, false);
+      toast((err && err.message) || 'Save failed', 'error');
     })
     .saveBackdatedEntry(payload);
 }
 
-/* ─────────────── 4. CHECKOUT FORM ──────────── */
+/* ═══════════════════════════════════════════════════
+   4. CHECKOUT FORM
+   — Staff enter Res ID to look up existing reservation.
+═══════════════════════════════════════════════════ */
 function buildCheckoutForm(){
   return '<div class="card" id="form-checkout">'+
-    '<div class="card-header"><div><h3>Backdated Checkout</h3><p>Record a historical checkout for an existing reservation.</p></div>'+
-    '<button class="btn btn-ghost btn-sm" onclick="document.getElementById(\'entryFormContainer\').innerHTML=\'\'">✕ Close</button></div>'+
+    '<div class="card-header">'+
+      '<div><h3>Backdated Checkout</h3>'+
+      '<p>Look up the reservation and record the actual checkout date and time.</p></div>'+
+      '<button class="btn btn-ghost btn-sm" onclick="closeForm()">✕ Close</button>'+
+    '</div>'+
     '<div class="grid-2">'+
-      '<div class="field"><label>Reservation ID *</label><input id="co_resId" placeholder="RES0001" onblur="lookupResForCheckout()"></div>'+
-      '<div class="field"><label>Guest Name</label><input id="co_guestName" placeholder="Auto-fills" readonly></div>'+
-      '<div class="field"><label>Room No</label><input id="co_roomNo" placeholder="Auto-fills" readonly></div>'+
-      '<div class="field"><label>Scheduled Check Out</label><input id="co_scheduled" placeholder="Auto-fills" readonly></div>'+
-      '<div class="field"><label>Actual Check Out Date/Time *</label><input id="co_actual" type="datetime-local"></div>'+
-      '<div class="field"><label>Final Payment Status</label><select id="co_payStatus">'+
-        '<option value="">— No change —</option>'+
-        '<option>Paid</option><option>Part Paid</option><option>Unpaid</option>'+
-      '</select></div>'+
-      '<div class="field"><label>Transaction Date *</label><input id="co_txDate" type="date"></div>'+
-      '<div class="field span-2"><label>Note</label><textarea id="co_note" placeholder="Optional note"></textarea></div>'+
-      '<div class="span-2 modal-footer"><button class="btn btn-gold" onclick="submitCheckoutEntry(this)">Save Checkout Record</button></div>'+
+
+      '<div class="field span-2">'+
+        '<label>Reservation ID *</label>'+
+        '<div style="display:flex;gap:8px">'+
+          '<input id="co_resId" placeholder="e.g. RES0001" style="flex:1">'+
+          '<button class="btn btn-ghost" onclick="lookupRes(\'co_resId\', fillCheckoutFromLookup)">Look Up</button>'+
+        '</div>'+
+      '</div>'+
+
+      '<div class="field"><label>Guest Name</label>'+
+        '<input id="co_guestName" placeholder="Auto-fills after lookup" readonly></div>'+
+
+      '<div class="field"><label>Room No</label>'+
+        '<input id="co_roomNo" placeholder="Auto-fills after lookup" readonly></div>'+
+
+      '<div class="field"><label>Scheduled Check Out</label>'+
+        '<input id="co_scheduled" placeholder="Auto-fills after lookup" readonly></div>'+
+
+      '<div class="field"><label>Actual Check Out Date/Time *</label>'+
+        '<input id="co_actual" type="datetime-local"></div>'+
+
+      '<div class="field"><label>Final Payment Status</label>'+
+        '<select id="co_payStatus">'+
+          '<option value="">— No change —</option>'+
+          '<option>Paid</option><option>Part Paid</option><option>Unpaid</option>'+
+        '</select></div>'+
+
+      '<div class="field"><label>Transaction Date *</label>'+
+        '<input id="co_txDate" type="date"></div>'+
+
+      '<div class="field span-2"><label>Note</label>'+
+        '<textarea id="co_note" placeholder="Optional note"></textarea></div>'+
+
+      '<div class="span-2 modal-footer">'+
+        '<button class="btn btn-gold" onclick="submitCheckoutEntry(this)">Save Checkout Record</button>'+
+      '</div>'+
     '</div>'+
   '</div>';
 }
 
-function lookupResForCheckout(){
-  var resId = (document.getElementById('co_resId').value||'').trim();
-  if (!resId) return;
-  google.script.run
-    .withSuccessHandler(function(res){
-      if (!res||!res.ok) return;
-      if (res.data){
-        var f = function(id,v){ var el=document.getElementById(id); if(el&&v!==undefined) el.value=v; };
-        f('co_guestName', res.data.guestName);
-        f('co_roomNo', res.data.roomNo);
-        f('co_scheduled', res.data.checkOut);
-      }
-    })
-    .withFailureHandler(function(){})
-    .lookupReservationForPortal(resId);
+function fillCheckoutFromLookup(data){
+  fillFields({ co_guestName: data.guestName, co_roomNo: data.roomNo, co_scheduled: data.checkOut });
+  toast('Reservation found: ' + data.guestName + ' — scheduled out ' + data.checkOut, 'success');
 }
 
 function submitCheckoutEntry(btn){
-  var payload = {
-    entryType: 'Checkout',
-    resId: (document.getElementById('co_resId').value||'').trim(),
-    guestName: (document.getElementById('co_guestName').value||'').trim(),
-    roomNo: (document.getElementById('co_roomNo').value||'').trim(),
-    actualCheckout: document.getElementById('co_actual').value,
-    updatePaymentStatus: document.getElementById('co_payStatus').value,
-    txDate: document.getElementById('co_txDate').value,
-    note: (document.getElementById('co_note').value||'').trim()
-  };
-  if (!payload.resId) return toast('Reservation ID is required.','error');
-  if (!payload.actualCheckout) return toast('Actual checkout date/time is required.','error');
-  if (!payload.txDate) return toast('Transaction date is required.','error');
+  var resId = (document.getElementById('co_resId').value || '').trim();
+  if (!resId)                                        return toast('Enter and look up a Reservation ID first.', 'error');
+  if (!document.getElementById('co_actual').value)   return toast('Actual checkout date/time is required.', 'error');
+  if (!document.getElementById('co_txDate').value)   return toast('Transaction date is required.', 'error');
 
-  setBusy(btn,true);
+  var payload = {
+    entryType:           'Checkout',
+    resId:                resId,
+    guestName:           (document.getElementById('co_guestName').value || '').trim(),
+    roomNo:              (document.getElementById('co_roomNo').value    || '').trim(),
+    actualCheckout:       document.getElementById('co_actual').value,
+    updatePaymentStatus:  document.getElementById('co_payStatus').value,
+    txDate:               document.getElementById('co_txDate').value,
+    note:                (document.getElementById('co_note').value      || '').trim()
+  };
+
+  setBusy(btn, true);
   google.script.run
     .withSuccessHandler(function(res){
-      setBusy(btn,false);
-      if (!res||!res.ok){ toast(res?res.message:'Save failed','error'); return; }
-      toast('Checkout record saved.','success');
-      document.getElementById('entryFormContainer').innerHTML='';
+      setBusy(btn, false);
+      if (!res || !res.ok){ toast(res ? res.message : 'Save failed', 'error'); return; }
+      toast('Checkout record saved.', 'success');
+      closeForm();
     })
     .withFailureHandler(function(err){
-      setBusy(btn,false);
-      toast((err&&err.message)||'Save failed','error');
+      setBusy(btn, false);
+      toast((err && err.message) || 'Save failed', 'error');
     })
     .saveBackdatedEntry(payload);
 }
 
-/* ─────────────── 5. LATE CHECKOUT FORM ─────── */
+/* ═══════════════════════════════════════════════════
+   5. LATE CHECKOUT FORM
+   — Staff enter Res ID to look up existing reservation.
+   — Pay ID auto-generated server-side.
+═══════════════════════════════════════════════════ */
 function buildLateCheckoutForm(){
   return '<div class="card" id="form-latecheckout">'+
-    '<div class="card-header"><div><h3>Backdated Late Checkout Fee</h3><p>Record a historical late checkout fee payment.</p></div>'+
-    '<button class="btn btn-ghost btn-sm" onclick="document.getElementById(\'entryFormContainer\').innerHTML=\'\'">✕ Close</button></div>'+
+    '<div class="card-header">'+
+      '<div><h3>Backdated Late Checkout Fee</h3>'+
+      '<p>Look up the reservation and record the late checkout fee. Pay ID is auto-generated.</p></div>'+
+      '<button class="btn btn-ghost btn-sm" onclick="closeForm()">✕ Close</button>'+
+    '</div>'+
     '<div class="grid-2">'+
-      '<div class="field"><label>Reservation ID *</label><input id="lc_resId" placeholder="RES0001" onblur="lookupResForLateCheckout()"></div>'+
-      '<div class="field"><label>Guest Name</label><input id="lc_guestName" placeholder="Auto-fills" readonly></div>'+
-      '<div class="field"><label>Room No</label><input id="lc_roomNo" placeholder="Auto-fills" readonly></div>'+
-      '<div class="field"><label>Late Checkout Fee (₦) *</label><input id="lc_amount" type="number" min="0" placeholder="Fee amount"></div>'+
-      '<div class="field"><label>RRR / Reference</label><input id="lc_rrr" placeholder="Payment reference"></div>'+
-      '<div class="field"><label>Transaction Date *</label><input id="lc_txDate" type="date"></div>'+
-      '<div class="field span-2"><label>Note</label><textarea id="lc_note" placeholder="Optional note"></textarea></div>'+
-      '<div class="span-2 modal-footer"><button class="btn btn-gold" onclick="submitLateCheckoutEntry(this)">Save Late Checkout Fee</button></div>'+
+
+      '<div class="field span-2">'+
+        '<label>Reservation ID *</label>'+
+        '<div style="display:flex;gap:8px">'+
+          '<input id="lc_resId" placeholder="e.g. RES0001" style="flex:1">'+
+          '<button class="btn btn-ghost" onclick="lookupRes(\'lc_resId\', fillLateCheckoutFromLookup)">Look Up</button>'+
+        '</div>'+
+      '</div>'+
+
+      '<div class="field"><label>Guest Name</label>'+
+        '<input id="lc_guestName" placeholder="Auto-fills after lookup" readonly></div>'+
+
+      '<div class="field"><label>Room No</label>'+
+        '<input id="lc_roomNo" placeholder="Auto-fills after lookup" readonly></div>'+
+
+      '<div class="field"><label>Late Checkout Fee (₦) *</label>'+
+        '<input id="lc_amount" type="number" min="0" placeholder="Fee amount"></div>'+
+
+      '<div class="field"><label>RRR / Reference</label>'+
+        '<input id="lc_rrr" placeholder="Payment reference"></div>'+
+
+      '<div class="field"><label>Transaction Date *</label>'+
+        '<input id="lc_txDate" type="date"></div>'+
+
+      '<div class="field span-2"><label>Note</label>'+
+        '<textarea id="lc_note" placeholder="Optional note"></textarea></div>'+
+
+      '<div class="span-2 modal-footer">'+
+        '<button class="btn btn-gold" onclick="submitLateCheckoutEntry(this)">Save Late Checkout Fee</button>'+
+      '</div>'+
     '</div>'+
   '</div>';
 }
 
-function lookupResForLateCheckout(){
-  var resId = (document.getElementById('lc_resId').value||'').trim();
-  if (!resId) return;
-  google.script.run
-    .withSuccessHandler(function(res){
-      if (!res||!res.ok) return;
-      if (res.data){
-        var f = function(id,v){ var el=document.getElementById(id); if(el&&v!==undefined) el.value=v; };
-        f('lc_guestName', res.data.guestName);
-        f('lc_roomNo', res.data.roomNo);
-      }
-    })
-    .withFailureHandler(function(){})
-    .lookupReservationForPortal(resId);
+function fillLateCheckoutFromLookup(data){
+  fillFields({ lc_guestName: data.guestName, lc_roomNo: data.roomNo });
+  toast('Reservation found: ' + data.guestName + ' — ' + data.roomNo, 'success');
 }
 
 function submitLateCheckoutEntry(btn){
+  var resId  = (document.getElementById('lc_resId').value || '').trim();
+  if (!resId)                                        return toast('Enter and look up a Reservation ID first.', 'error');
+  var amount = Number(document.getElementById('lc_amount').value || 0);
+  if (!amount || amount <= 0)                        return toast('Enter a valid fee amount.', 'error');
+  if (!document.getElementById('lc_txDate').value)   return toast('Transaction date is required.', 'error');
+
   var payload = {
     entryType: 'Late Checkout',
-    resId: (document.getElementById('lc_resId').value||'').trim(),
-    guestName: (document.getElementById('lc_guestName').value||'').trim(),
-    roomNo: (document.getElementById('lc_roomNo').value||'').trim(),
-    amount: Number(document.getElementById('lc_amount').value||0),
-    rrrNumber: (document.getElementById('lc_rrr').value||'').trim(),
-    txDate: document.getElementById('lc_txDate').value,
-    note: (document.getElementById('lc_note').value||'').trim()
+    resId:      resId,
+    guestName: (document.getElementById('lc_guestName').value || '').trim(),
+    roomNo:    (document.getElementById('lc_roomNo').value    || '').trim(),
+    amount:     amount,
+    rrrNumber: (document.getElementById('lc_rrr').value       || '').trim(),
+    txDate:     document.getElementById('lc_txDate').value,
+    note:      (document.getElementById('lc_note').value      || '').trim()
+    // payId intentionally omitted — server generates it
   };
-  if (!payload.resId) return toast('Reservation ID is required.','error');
-  if (!payload.amount || payload.amount <= 0) return toast('Enter a valid fee amount.','error');
-  if (!payload.txDate) return toast('Transaction date is required.','error');
 
-  setBusy(btn,true);
+  setBusy(btn, true);
   google.script.run
     .withSuccessHandler(function(res){
-      setBusy(btn,false);
-      if (!res||!res.ok){ toast(res?res.message:'Save failed','error'); return; }
-      toast('Late checkout fee saved.','success');
-      document.getElementById('entryFormContainer').innerHTML='';
+      setBusy(btn, false);
+      if (!res || !res.ok){ toast(res ? res.message : 'Save failed', 'error'); return; }
+      toast('Late checkout fee saved. Pay ID: ' + res.entryId, 'success');
+      closeForm();
     })
     .withFailureHandler(function(err){
-      setBusy(btn,false);
-      toast((err&&err.message)||'Save failed','error');
+      setBusy(btn, false);
+      toast((err && err.message) || 'Save failed', 'error');
     })
     .saveBackdatedEntry(payload);
 }

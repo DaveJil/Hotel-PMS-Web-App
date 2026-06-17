@@ -101,7 +101,7 @@ function renderLogin(){
           <button
             class="btn btn-dark"
             style="width:100%;font-size:.82rem;padding:10px 14px;color:#c9a227;border-color:rgba(201,162,39,0.25)"
-            onclick="window.open(window.location.href.split('?')[0] + '?portal=backdated', '_blank')">
+            onclick="google.script.run.withSuccessHandler(function(url){ window.open(url,'_blank'); }).getPortalUrl()">
             ↗ Backdated Entry Portal
           </button>
         </div>
@@ -295,6 +295,17 @@ function renderActiveTab(){
       document.getElementById('dashboardSection').style.display='block';
       renderDashboard();
   }
+}
+
+function openBackdatedPortal(){
+  var base = window.location.href;
+  // Handle both /exec and /dev URLs
+  var url = base.split('?')[0].split('#')[0];
+  if (url.indexOf('/exec') === -1 && url.indexOf('/dev') === -1) {
+    toast('Could not determine portal URL.', 'error');
+    return;
+  }
+  window.open(url + '?portal=backdated', '_blank');
 }
 
 function hideAllSections(){
@@ -1536,6 +1547,7 @@ function renderBookingHistory(){
               <th>Amount</th>
               <th>Payment</th>
               <th>Status</th>
+              <th>Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -1555,6 +1567,7 @@ function renderBookingHistory(){
                   <td>₦${fmt(r.netAmount)}</td>
                   <td>${badge(r.paymentStatus)}</td>
                   <td>${badge(r.status)}</td>
+                  <td><button class="btn btn-outline" onclick="printBookingReceipt('${escapeJs(r.resId)}')">Print Receipt</button></td>
                 </tr>
               `;
             }).join('') : `<tr><td colspan="9" class="empty">No booking history</td></tr>`}
@@ -1720,6 +1733,7 @@ function renderReports(){
           <button class="btn btn-outline" onclick="printBookingPaymentReport()">Print</button>
           <button class="btn btn-primary" onclick="downloadBookingPaymentReportPdfAction(this)">Download PDF</button>
           <button type="button" class="btn btn-primary" onclick="downloadFinancialReportAction(this)">Download Financial Report</button>
+          <button type="button" class="btn btn-outline" onclick="downloadFinancialReportCsv(this)">Download CSV</button>
         </div>
       </div>
 
@@ -1871,6 +1885,252 @@ function renderReports(){
       </div>
     </div>
   `;
+}
+
+function downloadFinancialReportCsv(btn) {
+  setBusy(btn, true);
+
+  try {
+    const bookingRows = getBookingReportRows().filter(function(r) {
+      return String(r.paymentStatus || '').trim().toLowerCase() !== 'free/pr'
+        && Number(r.netAmount || 0) > 0;
+    });
+
+    const paymentRows = getPaymentReportRows().filter(function(r) {
+      const type = String(r.paymentType || '').trim().toLowerCase();
+      const note = String(r.note || '').trim().toLowerCase();
+      return type !== 'free/pr' && note.indexOf('free/pr') === -1
+        && Number(r.amount || 0) > 0;
+    });
+
+    const rangeText = (APP.reportRange.start || 'Beginning') + ' to ' + (APP.reportRange.end || 'Today');
+    const generatedAt = new Date().toLocaleString();
+
+    function escapeCsv(val) {
+      const s = String(val == null ? '' : val);
+      if (s.indexOf(',') > -1 || s.indexOf('"') > -1 || s.indexOf('\n') > -1) {
+        return '"' + s.replaceAll('"', '""') + '"';
+      }
+      return s;
+    }
+
+    function row(cells) {
+      return cells.map(escapeCsv).join(',');
+    }
+
+    const totalRevenue = paymentRows.reduce(function(sum, r) { return sum + Number(r.amount || 0); }, 0);
+    const totalPaid = paymentRows
+      .filter(function(r) { return String(r.note || '').trim().toLowerCase() === 'paid'; })
+      .reduce(function(sum, r) { return sum + Number(r.amount || 0); }, 0);
+    const totalPartPaid = paymentRows
+      .filter(function(r) { return String(r.note || '').trim().toLowerCase() === 'part paid'; })
+      .reduce(function(sum, r) { return sum + Number(r.amount || 0); }, 0);
+
+    const totalReserved   = bookingRows.filter(function(r) { return r.status === 'Reserved'; }).length;
+    const totalCheckedIn  = bookingRows.filter(function(r) { return r.status === 'Checked In'; }).length;
+    const totalCheckedOut = bookingRows.filter(function(r) { return r.status === 'Checked Out'; }).length;
+    const totalCancelled  = bookingRows.filter(function(r) { return r.status === 'Cancelled'; }).length;
+
+    const lines = [];
+
+    lines.push(row(['NDDC CLUBHOUSE FINANCIAL REPORT']));
+    lines.push(row(['Period', rangeText]));
+    lines.push(row(['Generated', generatedAt]));
+    lines.push('');
+
+    lines.push(row(['SUMMARY']));
+    lines.push(row(['Total Revenue', '₦' + fmt(totalRevenue)]));
+    lines.push(row(['Paid', '₦' + fmt(totalPaid)]));
+    lines.push(row(['Part Paid', '₦' + fmt(totalPartPaid)]));
+    lines.push(row(['Reserved', totalReserved]));
+    lines.push(row(['Checked In', totalCheckedIn]));
+    lines.push(row(['Checked Out', totalCheckedOut]));
+    lines.push(row(['Cancelled', totalCancelled]));
+    lines.push('');
+
+    lines.push(row(['PAYMENT HISTORY']));
+    lines.push(row(['Payment ID', 'Res ID', 'Guest Name', 'Room No', 'Type', 'Amount', 'RRR Number', 'Date', 'Note']));
+    paymentRows.forEach(function(r) {
+      lines.push(row([
+        r.paymentId || '',
+        r.resId || '',
+        r.guestName || '',
+        r.roomNo || '',
+        r.paymentType || '',
+        r.amount || 0,
+        r.rrrNumber || '',
+        r.paymentDate || '',
+        r.note || ''
+      ]));
+    });
+    lines.push('');
+
+    lines.push(row(['BOOKING HISTORY']));
+    lines.push(row(['Res ID', 'Guest Name', 'Phone', 'Room No', 'Room Type', 'Check In', 'Check Out', 'Nights', 'Discount %', 'Net Amount', 'Payment Status', 'Channel', 'Status', 'Created At']));
+    bookingRows.forEach(function(r) {
+      lines.push(row([
+        r.resId || '',
+        r.guestName || '',
+        r.phone || '',
+        r.roomNo || '',
+        r.roomType || '',
+        r.checkIn || '',
+        r.checkOut || '',
+        r.nights || 0,
+        r.discountPct || 0,
+        r.netAmount || 0,
+        r.paymentStatus || '',
+        r.channel || '',
+        r.status || '',
+        r.createdAt || ''
+      ]));
+    });
+
+    const csvContent = lines.join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const fileName = 'Financial_Report_' + new Date().toISOString().slice(0, 10) + '.csv';
+
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = fileName;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+
+    setTimeout(function() { URL.revokeObjectURL(url); }, 2000);
+
+    toast('CSV downloaded.', 'success');
+  } catch (err) {
+    toast('CSV download failed: ' + (err.message || err), 'error');
+  } finally {
+    setBusy(btn, false);
+  }
+}
+
+function printBookingReceipt(resId) {
+  const booking = APP.bookingHistory.find(function(r) { return r.resId === resId; });
+  if (!booking) return toast('Booking record not found.', 'error');
+
+  const payments = (APP.paymentHistory || APP.payments || []).filter(function(p) {
+    return p.resId === resId;
+  });
+  const totalPaid = payments.reduce(function(sum, p) { return sum + Number(p.amount || 0); }, 0);
+
+  const branding = APP.branding || {};
+  const logoHtml = branding.logoDataUri
+    ? `<img src="${escapeAttr(branding.logoDataUri)}" alt="Logo" style="max-height:60px;display:block;margin-bottom:10px">`
+    : '';
+
+  const paymentRows = payments.length
+    ? payments.map(function(p) {
+        return `<tr>
+          <td>${escapeHtml(p.paymentId || '')}</td>
+          <td>${escapeHtml(p.paymentType || '')}</td>
+          <td>₦${fmt(p.amount || 0)}</td>
+          <td>${escapeHtml(p.rrrNumber || '-')}</td>
+          <td>${escapeHtml(p.paymentDate || '-')}</td>
+        </tr>`;
+      }).join('')
+    : `<tr><td colspan="5" style="text-align:center;color:#888">No payment records found</td></tr>`;
+
+  const html = `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>Receipt - ${escapeHtml(booking.resId)}</title>
+      <style>
+        @page { size: A4 portrait; margin: 16mm; }
+        body { font-family: Arial, sans-serif; color: #111; padding: 24px; }
+        .header { border-bottom: 2px solid #111; padding-bottom: 14px; margin-bottom: 20px; }
+        .hotel-name { font-size: 22px; font-weight: 800; margin: 0; }
+        .tagline { font-size: 13px; color: #555; margin: 4px 0 0; }
+        .receipt-title { font-size: 16px; font-weight: 700; color: #555; margin-top: 8px; }
+        .section { margin-bottom: 20px; }
+        .section h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: #666; border-bottom: 1px solid #ddd; padding-bottom: 6px; margin-bottom: 10px; }
+        table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        th, td { padding: 8px 10px; border: 1px solid #ddd; text-align: left; }
+        th { background: #f4f4f4; font-weight: 700; }
+        .detail-table td:first-child { font-weight: 600; width: 40%; background: #fafafa; }
+        .total-row td { font-weight: 800; font-size: 14px; background: #f0f0f0; }
+        .footer { margin-top: 28px; border-top: 1px solid #ddd; padding-top: 12px; font-size: 11px; color: #888; text-align: center; }
+        .badge { display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 11px; font-weight: 700; }
+        .badge.paid { background: #d4f4e3; color: #1a7a45; }
+        .badge.unpaid { background: #fde8e8; color: #b22; }
+        .badge.part-paid { background: #fff3cd; color: #7a5800; }
+      </style>
+    </head>
+    <body>
+      <div class="header">
+        ${logoHtml}
+        <p class="hotel-name">${escapeHtml(branding.hotelName || 'NDDC Clubhouse')}</p>
+        <p class="tagline">${escapeHtml(branding.tagline || '')}</p>
+        <p class="receipt-title">GUEST BOOKING RECEIPT</p>
+      </div>
+
+      <div class="section">
+        <h3>Booking Details</h3>
+        <table class="detail-table">
+          <tr><td>Reservation ID</td><td>${escapeHtml(booking.resId)}</td></tr>
+          <tr><td>Guest Name</td><td>${escapeHtml(booking.guestName)}</td></tr>
+          <tr><td>Email</td><td>${escapeHtml(booking.email || '-')}</td></tr>
+          <tr><td>Room No</td><td>${escapeHtml(booking.roomNo)}</td></tr>
+          <tr><td>Room Type</td><td>${escapeHtml(booking.roomType || '-')}</td></tr>
+          <tr><td>Check In</td><td>${escapeHtml(booking.checkIn)}</td></tr>
+          <tr><td>Check Out</td><td>${escapeHtml(booking.checkOut)}</td></tr>
+          <tr><td>Actual Checkout</td><td>${escapeHtml(booking.actualCheckout || '-')}</td></tr>
+          <tr><td>Nights</td><td>${escapeHtml(String(booking.nights || 0))}</td></tr>
+          <tr><td>Channel</td><td>${escapeHtml(booking.channel || '-')}</td></tr>
+          <tr><td>RRR Number</td><td>${escapeHtml(booking.rrrNumber || '-')}</td></tr>
+          <tr><td>Status</td><td>${escapeHtml(booking.status || '-')}</td></tr>
+        </table>
+      </div>
+
+      <div class="section">
+        <h3>Charges</h3>
+        <table class="detail-table">
+          <tr><td>Discount</td><td>${escapeHtml(String(booking.discountPct || 0))}%</td></tr>
+          <tr><td>Room Total</td><td>₦${fmt(booking.netAmount || 0)}</td></tr>
+          ${booking.lateCheckout === 'Yes' ? `<tr><td>Late Checkout Fee</td><td>₦${fmt(booking.lateCheckoutAmount || 0)}</td></tr>` : ''}
+          <tr class="total-row"><td>Total Paid</td><td>₦${fmt(totalPaid)}</td></tr>
+          <tr><td>Payment Status</td><td>${escapeHtml(booking.paymentStatus || '-')}</td></tr>
+        </table>
+      </div>
+
+      <div class="section">
+        <h3>Payment Records</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>Payment ID</th>
+              <th>Type</th>
+              <th>Amount</th>
+              <th>RRR</th>
+              <th>Date</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${paymentRows}
+          </tbody>
+        </table>
+      </div>
+
+      <div class="footer">
+        Receipt generated on ${new Date().toLocaleString()} &nbsp;|&nbsp; ${escapeHtml(branding.hotelName || 'NDDC Clubhouse')}
+      </div>
+
+      <script>
+        window.onload = function() { window.print(); };
+      <\/script>
+    </body>
+    </html>
+  `;
+
+  const win = window.open('', '_blank');
+  if (!win) return toast('Please allow pop-ups to print the receipt.', 'error');
+  win.document.open();
+  win.document.write(html);
+  win.document.close();
 }
 
 function renderMaintenance(){
