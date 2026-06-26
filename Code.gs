@@ -2870,7 +2870,7 @@ function getBookingPaymentReportData_(payload) {
     getBookingHistory_(),
     payload.startDate,
     payload.endDate,
-    ['createdAt', 'checkIn', 'updatedAt', 'actualCheckout']
+    ['checkIn']   // ← was ['createdAt', 'checkIn', 'updatedAt', 'actualCheckout']
   );
 
   const payments = filterRowsByDateRangeServer_(
@@ -2888,7 +2888,7 @@ function getFinancialReportData_(payload) {
     getBookingHistory_(),
     payload.startDate,
     payload.endDate,
-    ['createdAt', 'checkIn', 'updatedAt', 'actualCheckout']
+    ['checkIn']   // ← was ['createdAt', 'checkIn', 'updatedAt', 'actualCheckout']
   ).filter(function(r) {
     return String(r.paymentStatus || '').trim() !== 'Free/PR' && Number(r.netAmount || 0) > 0;
   });
@@ -3109,22 +3109,20 @@ function downloadFinancialReport(startDate, endDate) {
     const payments = getObjects_(paymentSheet);
 
     const filteredBookings = bookings.filter(function(r) {
-      const d = new Date(r['Created At'] || r['Date'] || r['Check In']);
+      const d = new Date(r['Check In']);  // ← use Check In only
       if (isNaN(d.getTime())) return false;
       if (start && d < start) return false;
       if (end && d > end) return false;
-
       const paymentStatus = String(r['Payment Status'] || '').trim().toLowerCase();
       const netAmount = Number(r['Net Amount'] || 0);
       return paymentStatus !== 'free/pr' && netAmount > 0;
     });
 
     const filteredPayments = payments.filter(function(r) {
-      const d = new Date(r['Date'] || r['Payment Date']);
+      const d = new Date(r['Payment Date']);  // ← use Payment Date only
       if (isNaN(d.getTime())) return false;
       if (start && d < start) return false;
       if (end && d > end) return false;
-
       const status = String(r['Status'] || r['Note'] || '').trim().toLowerCase();
       const amount = Number(r['Amount'] || 0);
       return status !== 'free/pr' && amount > 0;

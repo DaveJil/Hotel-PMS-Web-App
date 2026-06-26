@@ -2273,7 +2273,7 @@ function clearCleaningReportFilters(){
 }
 
 function getBookingReportRows(){
-  return filterRowsByDateRange(APP.bookingHistory, APP.reportRange.start, APP.reportRange.end, ['createdAt','checkIn','updatedAt','actualCheckout']);
+  return filterRowsByDateRange(APP.bookingHistory, APP.reportRange.start, APP.reportRange.end, ['checkIn']);
 }
 
 function getPaymentReportRows(){
