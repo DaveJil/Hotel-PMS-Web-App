@@ -16,6 +16,7 @@ const {
 } = require('./email');
 
 let currentUser = null;
+let portalUser = null;
 
 function asText(value) {
   return value == null ? '' : String(value);
@@ -355,7 +356,7 @@ function reservationActionRooms(unitNo) {
   return grouped.length ? grouped.map((room) => room.room_no) : [String(unitNo)];
 }
 
-function isReservationConflict(unitNo, checkIn, checkOut, excludeResId) {
+function findReservationConflict(unitNo, checkIn, checkOut, excludeResId) {
   const reqStart = new Date(`${checkIn}T00:00:00`);
   const reqEnd = new Date(`${checkOut}T00:00:00`);
   if (Number.isNaN(reqStart.getTime()) || Number.isNaN(reqEnd.getTime())) throw new Error('Invalid reservation dates.');
@@ -368,7 +369,7 @@ function isReservationConflict(unitNo, checkIn, checkOut, excludeResId) {
     .prepare("SELECT * FROM Reservations WHERE status IN ('Reserved', 'Checked In')")
     .all();
 
-  return rows.some((row) => {
+  return rows.find((row) => {
     if (excludeResId && String(row.res_id) === String(excludeResId)) return false;
     const start = new Date(`${formatDateOnly(row.check_in)}T00:00:00`);
     const end = new Date(`${formatDateOnly(row.check_out)}T00:00:00`);
@@ -379,6 +380,22 @@ function isReservationConflict(unitNo, checkIn, checkOut, excludeResId) {
     if (reservedUnit === String(unitNo)) return true;
     return Boolean(selectedRoom && selectedRoom.apartmentGroup && reservedUnit === selectedRoom.apartmentGroup);
   });
+}
+
+function reservationConflictResponse(conflict) {
+  return {
+    ok: false,
+    code: 'RESERVATION_CONFLICT',
+    message: `${conflict.room_no} is already assigned to ${conflict.res_id} (${conflict.guest_name}) from ${formatDateOnly(conflict.check_in)} to ${formatDateOnly(conflict.check_out)}. Open and edit that reservation before booking this room.`,
+    conflict: {
+      resId: asText(conflict.res_id),
+      guestName: asText(conflict.guest_name),
+      roomNo: asText(conflict.room_no),
+      checkIn: formatDateOnly(conflict.check_in),
+      checkOut: formatDateOnly(conflict.check_out),
+      status: asText(conflict.status)
+    }
+  };
 }
 
 function updateActionRoomStatuses(unitNo, updates) {
@@ -538,7 +555,8 @@ function reservationAmounts(payload) {
 function createReservationLocal(payload) {
   try {
     validateReservation(payload);
-    if (isReservationConflict(payload.roomNo, payload.checkIn, payload.checkOut)) throw new Error('Selected room or apartment is not available for those dates.');
+    const conflict = findReservationConflict(payload.roomNo, payload.checkIn, payload.checkOut);
+    if (conflict) return reservationConflictResponse(conflict);
     const totals = reservationAmounts(payload);
     const resId = makeId('RES', 'Reservations', 'res_id');
     const userName = actor();
@@ -572,7 +590,8 @@ function updateReservationLocal(resId, payload) {
     const current = getReservationRow(resId);
     if (!current) throw new Error('Reservation not found.');
     if (!['Reserved', 'Checked In'].includes(current.status)) throw new Error('Only reserved or checked-in bookings can be edited.');
-    if (isReservationConflict(payload.roomNo, payload.checkIn, payload.checkOut, resId)) throw new Error('Selected room or apartment is not available for those dates.');
+    const conflict = findReservationConflict(payload.roomNo, payload.checkIn, payload.checkOut, resId);
+    if (conflict) return reservationConflictResponse(conflict);
     const totals = reservationAmounts(payload);
     const paymentStatus = payload.paymentStatus || 'Unpaid';
     const discountPct = Number(payload.discountPct || 0);
@@ -633,7 +652,8 @@ function extendStayLocal(payload) {
     if (!row) throw new Error('Reservation not found');
     if (row.status !== 'Checked In') throw new Error('Only checked-in guests can extend stay.');
     if (new Date(payload.newCheckOut) <= new Date(row.check_out)) throw new Error('New checkout date must be after current checkout date.');
-    if (isReservationConflict(row.room_no, formatDateOnly(row.check_out), payload.newCheckOut, payload.resId)) throw new Error('Cannot extend stay because the room/apartment is already reserved for the extended dates.');
+    const conflict = findReservationConflict(row.room_no, formatDateOnly(row.check_out), payload.newCheckOut, payload.resId);
+    if (conflict) throw new Error(`Cannot extend stay because ${conflict.res_id} already reserves this room through the requested dates. Edit the conflicting reservation first.`);
     const newNights = nightsBetween(row.check_in, payload.newCheckOut);
     const newNet = isFreePrStatus(row.payment_status) ? 0 : Math.round((Number(row.rate || 0) * newNights) * (1 - Number(row.discount_pct || 0) / 100));
     const additional = Math.max(0, newNet - Number(row.net_amount || 0));
@@ -689,6 +709,278 @@ function updatePaymentLocal(payload) {
     upsertReservationPayment({ ...row, payment_status: status, rrr_number: rrr, rate, net_amount: net }, status, rrr);
     audit('Update Payment', currentUser.username, `${payload.resId} payment updated`);
     return okWithBootstrap('Payment updated successfully.');
+  } catch (err) {
+    return { ok: false, message: err.message };
+  }
+}
+
+function requirePortalUser() {
+  if (!portalUser || portalUser.role !== 'Backdated') {
+    throw new Error('Backdated portal session expired. Please log in again.');
+  }
+  return portalUser;
+}
+
+function getPortalReservations() {
+  const seen = new Set();
+  return [...getReservations(), ...getBookingHistory()].filter((row) => {
+    if (!row.resId || seen.has(row.resId)) return false;
+    seen.add(row.resId);
+    return true;
+  });
+}
+
+function portalBootstrap() {
+  if (!portalUser) return { ok: false };
+  return {
+    ok: true,
+    user: portalUser,
+    rooms: getRoomsData(),
+    reservations: getPortalReservations(),
+    channels: getChannels()
+  };
+}
+
+function portalLoginLocal(username, password) {
+  try {
+    portalUser = null;
+    const row = getDb().prepare(`
+      SELECT user_id, username, full_name, role, status
+      FROM Users
+      WHERE lower(username) = lower(?)
+        AND password = ?
+        AND lower(status) = 'active'
+        AND role = 'Backdated'
+      ORDER BY user_id
+      LIMIT 1
+    `).get(String(username || '').trim(), String(password || '').trim());
+    if (!row) return { ok: false, message: 'Invalid credentials or access not permitted.' };
+    portalUser = {
+      userId: asText(row.user_id),
+      username: asText(row.username),
+      fullName: asText(row.full_name || row.username),
+      role: 'Backdated',
+      status: asText(row.status)
+    };
+    audit('Portal Login', portalUser.username, 'Backdated portal login');
+    return portalBootstrap();
+  } catch (err) {
+    return { ok: false, message: err.message };
+  }
+}
+
+function lookupPortalReservation(resId) {
+  try {
+    requirePortalUser();
+    const found = getPortalReservations().find((row) => row.resId === String(resId || '').trim());
+    return found
+      ? { ok: true, data: found }
+      : { ok: false, message: 'Reservation not found.' };
+  } catch (err) {
+    return { ok: false, message: err.message };
+  }
+}
+
+function updateBackdatedPaymentStatus(resId, status, rrrNumber) {
+  if (!status) return;
+  getDb().prepare(`
+    UPDATE Reservations
+    SET payment_status = ?, rrr_number = CASE WHEN ? = '' THEN rrr_number ELSE ? END
+    WHERE res_id = ?
+  `).run(status, rrrNumber || '', rrrNumber || '', resId);
+  getDb().prepare(`
+    UPDATE BookingHistory
+    SET payment_status = ?, rrr_number = CASE WHEN ? = '' THEN rrr_number ELSE ? END, updated_at = ?
+    WHERE res_id = ?
+  `).run(status, rrrNumber || '', rrrNumber || '', nowIso(), resId);
+}
+
+function insertBackdatedPayment(payload, actionBy, paymentType) {
+  const paymentId = makeId('PAY', 'PaymentHistory', 'payment_id');
+  getDb().prepare(`
+    INSERT INTO PaymentHistory
+      (payment_id, res_id, guest_name, room_no, payment_type, amount, rrr_number, payment_date, action_by, note, receipt, receipt_name)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', '')
+  `).run(
+    paymentId,
+    payload.resId || '',
+    payload.guestName || '',
+    payload.roomNo || '',
+    paymentType,
+    Number(payload.amount || 0),
+    payload.rrrNumber || '',
+    payload.txDate,
+    actionBy,
+    `[Backdated] ${payload.note || paymentType}`
+  );
+  return paymentId;
+}
+
+function logBackdatedEntry(payload, result, user) {
+  getDb().prepare(`
+    INSERT INTO BackdatedEntryLog
+      (entry_id, entry_type, res_id, guest_name, room_no, amount, transaction_date, entered_by, note, logged_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    makeId('BD', 'BackdatedEntryLog', 'entry_id'),
+    payload.entryType,
+    result.resId || payload.resId || '',
+    result.guestName || payload.guestName || '',
+    result.roomNo || payload.roomNo || '',
+    Number(result.amount || payload.amount || 0),
+    payload.txDate || '',
+    user.fullName || user.username,
+    payload.note || payload.notes || '',
+    nowIso()
+  );
+}
+
+function saveBackdatedReservation(payload, user) {
+  validateReservation(payload);
+  if (!payload.txDate) throw new Error('Original transaction date is required.');
+  const conflict = findReservationConflict(payload.roomNo, payload.checkIn, payload.checkOut);
+  if (conflict) return reservationConflictResponse(conflict);
+
+  const totals = reservationAmounts(payload);
+  const resId = makeId('RES', 'Reservations', 'res_id');
+  const status = payload.reservationStatus || 'Checked Out';
+  const paymentStatus = payload.paymentStatus || 'Paid';
+  const actionBy = `${user.fullName || user.username} [Backdated]`;
+  const notes = `[Backdated] ${payload.notes || ''}`;
+  const actualCheckout = payload.actualCheckout || '';
+  const discountPct = Number(payload.discountPct || 0);
+
+  getDb().prepare(`
+    INSERT INTO Reservations
+      (res_id, guest_name, phone, email, room_no, room_type, check_in, check_out, nights, adults, rate, discount_pct, net_amount, channel, status, payment_status, rrr_number, action_by, notes, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    resId, payload.guestName, payload.phone || '', payload.email || '', payload.roomNo,
+    totals.roomType, payload.checkIn, payload.checkOut, totals.nights, Number(payload.adults || 1),
+    totals.rate, discountPct, totals.netAmount, payload.channel || 'Walk-in', status,
+    paymentStatus, payload.rrrNumber || '', actionBy, notes, payload.txDate
+  );
+  getDb().prepare(`
+    INSERT INTO BookingHistory
+      (res_id, guest_name, phone, email, room_no, room_type, check_in, check_out, actual_check_out, nights, adults, rate, discount_pct, discount_applied, net_amount, channel, status, payment_status, rrr_number, late_checkout, late_checkout_amount, action_by, notes, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'No', 0, ?, ?, ?, ?)
+  `).run(
+    resId, payload.guestName, payload.phone || '', payload.email || '', payload.roomNo,
+    totals.roomType, payload.checkIn, payload.checkOut, actualCheckout, totals.nights,
+    Number(payload.adults || 1), totals.rate, discountPct, discountPct > 0 ? 'Yes' : 'No',
+    totals.netAmount, payload.channel || 'Walk-in', status, paymentStatus,
+    payload.rrrNumber || '', actionBy, notes, payload.txDate, nowIso()
+  );
+  if (['Paid', 'Part Paid'].includes(paymentStatus) && totals.netAmount > 0) {
+    insertBackdatedPayment({
+      ...payload,
+      resId,
+      amount: totals.netAmount,
+      note: paymentStatus
+    }, actionBy, 'Reservation Payment');
+  }
+  return {
+    ok: true,
+    message: 'Backdated reservation saved.',
+    entryId: resId,
+    resId,
+    guestName: payload.guestName,
+    roomNo: payload.roomNo,
+    amount: totals.netAmount
+  };
+}
+
+function saveBackdatedEntryLocal(payload) {
+  try {
+    const user = requirePortalUser();
+    const actionBy = `${user.fullName || user.username} [Backdated]`;
+    let result;
+
+    getDb().transaction(() => {
+      if (payload.entryType === 'Reservation') {
+        result = saveBackdatedReservation(payload, user);
+        if (!result.ok) return;
+      } else {
+        const found = getPortalReservations().find((row) => row.resId === String(payload.resId || '').trim());
+        if (!found) throw new Error('Reservation not found. Enter a valid Reservation ID.');
+        payload.guestName = payload.guestName || found.guestName;
+        payload.roomNo = payload.roomNo || found.roomNo;
+        if (!payload.txDate) throw new Error('Transaction date is required.');
+
+        if (payload.entryType === 'Payment') {
+          if (Number(payload.amount || 0) <= 0) throw new Error('Valid amount required.');
+          const entryId = insertBackdatedPayment(payload, actionBy, payload.paymentType || 'Reservation Payment');
+          updateBackdatedPaymentStatus(payload.resId, payload.updatePaymentStatus, payload.rrrNumber);
+          result = { ok: true, message: 'Payment record saved.', entryId, resId: payload.resId, guestName: payload.guestName, roomNo: payload.roomNo, amount: Number(payload.amount) };
+        } else if (payload.entryType === 'Extension') {
+          if (!payload.newCheckOut) throw new Error('New checkout date is required.');
+          const existing = getDb().prepare('SELECT * FROM Reservations WHERE res_id = ?').get(payload.resId);
+          const history = getDb().prepare('SELECT * FROM BookingHistory WHERE res_id = ?').get(payload.resId);
+          const base = existing || history;
+          const conflict = findReservationConflict(payload.roomNo, base ? formatDateOnly(base.check_out) : found.checkOut, payload.newCheckOut, payload.resId);
+          if (conflict) throw new Error(`Cannot extend stay because ${conflict.res_id} already reserves this room. Edit that reservation first.`);
+          const nights = nightsBetween(base ? base.check_in : found.checkIn, payload.newCheckOut);
+          getDb().prepare('UPDATE Reservations SET check_out = ?, nights = ? WHERE res_id = ?').run(payload.newCheckOut, nights, payload.resId);
+          getDb().prepare('UPDATE BookingHistory SET check_out = ?, nights = ?, notes = ?, updated_at = ? WHERE res_id = ?')
+            .run(payload.newCheckOut, nights, appendNote(history && history.notes, `[Backdated Extension] Extended to ${payload.newCheckOut}`), nowIso(), payload.resId);
+          const entryId = Number(payload.amount || 0) > 0
+            ? insertBackdatedPayment(payload, actionBy, 'Extension Payment')
+            : `EXT-${payload.resId}`;
+          result = { ok: true, message: 'Extension saved.', entryId, resId: payload.resId, guestName: payload.guestName, roomNo: payload.roomNo, amount: Number(payload.amount || 0) };
+        } else if (payload.entryType === 'Checkout') {
+          if (!payload.actualCheckout) throw new Error('Actual checkout date/time is required.');
+          getDb().prepare("UPDATE Reservations SET status = 'Checked Out' WHERE res_id = ?").run(payload.resId);
+          bookingPatch(payload.resId, {
+            status: 'Checked Out',
+            actualCheckout: payload.actualCheckout,
+            paymentStatus: payload.updatePaymentStatus || undefined,
+            extraNote: payload.note ? `[Backdated Checkout] ${payload.note}` : ''
+          });
+          updateActionRoomStatuses(payload.roomNo, { status: 'Vacant', housekeepingStatus: 'Dirty' });
+          result = { ok: true, message: 'Checkout record saved.', entryId: `CO-${payload.resId}-${String(payload.txDate).replaceAll('-', '')}`, resId: payload.resId, guestName: payload.guestName, roomNo: payload.roomNo, amount: 0 };
+        } else if (payload.entryType === 'Late Checkout') {
+          if (Number(payload.amount || 0) <= 0) throw new Error('Valid fee amount required.');
+          const entryId = insertBackdatedPayment(payload, actionBy, 'Late Checkout Payment');
+          bookingPatch(payload.resId, {
+            lateCheckout: 'Yes',
+            lateCheckoutAmount: Number(payload.amount),
+            extraNote: `[Backdated Late Checkout] ${payload.note || ''}`
+          });
+          result = { ok: true, message: 'Late checkout fee saved.', entryId, resId: payload.resId, guestName: payload.guestName, roomNo: payload.roomNo, amount: Number(payload.amount) };
+        } else {
+          throw new Error(`Unknown entry type: ${payload.entryType || ''}`);
+        }
+      }
+
+      if (result && result.ok) logBackdatedEntry(payload, result, user);
+    })();
+
+    if (result && result.ok) {
+      audit(`Backdated ${payload.entryType}`, user.username, `${result.resId || payload.resId || ''} backdated ${payload.entryType}`);
+      enqueueTables(['Reservations', 'BookingHistory', 'PaymentHistory', 'Rooms', 'BackdatedEntryLog']);
+    }
+    return result;
+  } catch (err) {
+    return { ok: false, message: err.message };
+  }
+}
+
+function getBackdatedEntriesLocal() {
+  try {
+    requirePortalUser();
+    const rows = getDb().prepare('SELECT * FROM BackdatedEntryLog ORDER BY logged_at DESC').all().map((row) => ({
+      entryId: asText(row.entry_id),
+      entryType: asText(row.entry_type),
+      resId: asText(row.res_id),
+      guestName: asText(row.guest_name),
+      roomNo: asText(row.room_no),
+      amount: toNumber(row.amount),
+      txDate: formatDateOnly(row.transaction_date),
+      enteredBy: asText(row.entered_by),
+      note: asText(row.note),
+      loggedAt: formatDateTime(row.logged_at)
+    }));
+    return { ok: true, rows };
   } catch (err) {
     return { ok: false, message: err.message };
   }
@@ -1072,6 +1364,16 @@ function registerIpcHandlers() {
     return getSyncStatus();
   });
   ipcMain.handle('sync:runNow', () => processSyncQueue({ force: true }));
+  ipcMain.handle('portal:login', (_event, username, password) => portalLoginLocal(username, password));
+  ipcMain.handle('portal:logout', () => {
+    if (portalUser) audit('Portal Logout', portalUser.username, 'Backdated portal logout');
+    portalUser = null;
+    return { ok: true };
+  });
+  ipcMain.handle('portal:getBootstrap', () => portalBootstrap());
+  ipcMain.handle('portal:lookupReservation', (_event, resId) => lookupPortalReservation(resId));
+  ipcMain.handle('portal:saveEntry', (_event, payload) => saveBackdatedEntryLocal(payload || {}));
+  ipcMain.handle('portal:getEntries', () => getBackdatedEntriesLocal());
   ipcMain.handle('email:getStatus', () => getEmailStatus());
   ipcMain.handle('email:saveConfig', (_event, payload) => saveEmailConfig(payload || {}));
   ipcMain.handle('email:runNow', () => processEmailQueue({ force: true }));
@@ -1139,9 +1441,11 @@ function registerIpcHandlers() {
     }
   });
 
-  ipcMain.handle('app:getPortalUrl', () => null);
 }
 
 module.exports = {
-  registerIpcHandlers
+  registerIpcHandlers,
+  portalLoginLocal,
+  saveBackdatedEntryLocal,
+  findReservationConflict
 };

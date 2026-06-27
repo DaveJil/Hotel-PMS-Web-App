@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS Setup (
 
 CREATE TABLE IF NOT EXISTS Users (
   user_id TEXT PRIMARY KEY,
-  username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  username TEXT NOT NULL COLLATE NOCASE,
   password TEXT NOT NULL,
   full_name TEXT NOT NULL DEFAULT '',
   role TEXT NOT NULL DEFAULT '',
@@ -208,6 +208,22 @@ CREATE TABLE IF NOT EXISTS AuditLog (
   details TEXT NOT NULL DEFAULT ''
 );
 
+CREATE TABLE IF NOT EXISTS BackdatedEntryLog (
+  entry_id TEXT PRIMARY KEY,
+  entry_type TEXT NOT NULL DEFAULT '',
+  res_id TEXT NOT NULL DEFAULT '',
+  guest_name TEXT NOT NULL DEFAULT '',
+  room_no TEXT NOT NULL DEFAULT '',
+  amount REAL NOT NULL DEFAULT 0,
+  transaction_date TEXT NOT NULL DEFAULT '',
+  entered_by TEXT NOT NULL DEFAULT '',
+  note TEXT NOT NULL DEFAULT '',
+  logged_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_users_username
+  ON Users(username COLLATE NOCASE);
+
 CREATE TABLE IF NOT EXISTS SyncQueue (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   table_name TEXT NOT NULL,
@@ -267,14 +283,33 @@ INSERT OR IGNORE INTO Setup (setting, value) VALUES
   ('Tagline', 'Redefining Luxury Living'),
   ('Logo Data Uri', '');
 
-INSERT OR IGNORE INTO Users (user_id, username, password, full_name, role, status) VALUES
-  ('U001', 'admin', '1234', 'System Admin', 'Admin', 'Active');
+INSERT INTO Users (user_id, username, password, full_name, role, status) VALUES
+  ('U001', 'admin', '6585', 'System Admin', 'Admin', 'Active'),
+  ('U002', 'princesscherri', 'princess123', 'Princess Ndiukwu', 'Front Desk', 'Active'),
+  ('U003', 'josiaho', '8907', 'Josiah Onyomo', 'Housekeeping', 'Active'),
+  ('U004', 'abdallataleb', '8912', 'Abdalla Taleb', 'Manager', 'Active'),
+  ('U005', 'ezefranca', '8910', 'Eze Franca', 'Front Desk', 'Inactive'),
+  ('U006', 'preciousd', '8031', 'Daka Precious', 'Housekeeping', 'Active'),
+  ('U007', 'juiletb', '8341', 'Juliet Anderson', 'Housekeeping', 'Active'),
+  ('U0008', 'Testuser', '9876', 'Test User', 'Front Desk', 'Active'),
+  ('U0009', 'Testcleean', '6789', 'cleantest', 'Housekeeping', 'Active'),
+  ('U010', 'backdated', 'backdate123', 'Backdated Staff', 'Backdated', 'Active'),
+  ('U011', 'nkechisam', '7864', 'Nkechi Samuel Nwogu', 'Front Desk', 'Active'),
+  ('U012', 'princesscherri', 'cherri123', 'Princess Ndiukwu', 'Backdated', 'Active'),
+  ('U013', 'abigailnddc', '2560', 'Abigail NDDC', 'Manager', 'Active')
+ON CONFLICT(user_id) DO UPDATE SET
+  username = excluded.username,
+  password = excluded.password,
+  full_name = excluded.full_name,
+  role = excluded.role,
+  status = excluded.status;
 
 INSERT OR IGNORE INTO Roles (role_id, role_name, description, status) VALUES
   ('R001', 'Admin', 'Full access', 'Active'),
   ('R002', 'Front Desk', 'Reservations and check-in/out', 'Active'),
   ('R003', 'Manager', 'Reports and oversight', 'Active'),
-  ('R004', 'Housekeeping', 'Housekeeping and maintenance', 'Active');
+  ('R004', 'Housekeeping', 'Housekeeping and maintenance', 'Active'),
+  ('R005', 'Backdated', 'Backdated entry portal access', 'Active');
 
 INSERT OR IGNORE INTO Channels (channel) VALUES
   ('Walk-in'),

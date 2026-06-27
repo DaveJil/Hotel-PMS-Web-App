@@ -309,12 +309,8 @@ function renderActiveTab(){
 
 async function openBackdatedPortal(){
   try {
-    const url = await getLocalApi().getPortalUrl();
-    if (url) {
-      window.open(url, '_blank');
-      return;
-    }
-    toast('Backdated Entry Portal will be migrated after the core PMS modules.', 'error');
+    const res = await getLocalApi().openBackdatedPortal();
+    if (!res || !res.ok) toast((res && res.message) || 'Unable to open portal', 'error');
   } catch (err) {
     toast((err && err.message) || 'Unable to open portal', 'error');
   }
@@ -382,7 +378,7 @@ function renderDashboard(){
     <div class="panel">
       <div class="section-title">
         <strong>Room Overview</strong>
-        <span class="muted">${APP.rooms.length} rooms loaded from Google Sheets</span>
+        <span class="muted">${APP.rooms.length} rooms loaded</span>
       </div>
       <div id="roomList" class="rooms-grid"></div>
     </div>
@@ -489,6 +485,11 @@ async function checkMailAuthorizationUI(callback){
 
 async function hardRefreshApp(){
   try {
+    const syncStatus = await getLocalApi().getSyncStatus();
+    let syncResult = syncStatus;
+    if (syncStatus && syncStatus.enabled && syncStatus.configured) {
+      syncResult = await getLocalApi().runSyncNow();
+    }
     const res = await getLocalApi().getAppBootstrap();
     if (!res || !res.ok) {
       toast((res && res.message) || 'Refresh failed', 'error');
@@ -508,15 +509,17 @@ async function hardRefreshApp(){
 
     renderAppShell();
     renderActiveTab();
-    toast('Data refreshed.', 'success');
+    const syncMessage = syncResult && syncResult.enabled
+      ? (syncResult.lastStatus || 'Sync checked')
+      : 'Local data refreshed';
+    toast(syncMessage, syncResult && syncResult.lastError ? 'error' : 'success');
   } catch (err) {
     toast((err && err.message) || 'Refresh failed', 'error');
   }
 }
 
-function refreshPaymentHistoryOnly(callback){
-  APP.payments = APP.paymentHistory || [];
-  if (APP.activeTab === 'paymentHistory') renderPaymentHistory();
+async function refreshPaymentHistoryOnly(callback){
+  await hardRefreshApp();
   if (typeof callback === 'function') callback(true);
 } 
 
@@ -629,20 +632,35 @@ async function saveReservation(btn, resId){
     notes: document.getElementById('resNotes').value.trim()
   };
 
-  await runApiAction(
-    btn,
-    resId ? 'updateReservation' : 'createReservation',
-    resId ? [resId, payload] : [payload],
-    function(res){
-      mergeAppData(res.data);
-      rerenderReservationsOnly();
-      rerenderRoomsOnly();
-      rerenderReportsOnly();
-      closeModal();
-      toast(res.message || 'Reservation saved', 'success');
-    },
-    'Reservation failed'
-  );
+  setBusy(btn, true);
+  try {
+    const api = getLocalApi();
+    const res = resId
+      ? await api.updateReservation(resId, payload)
+      : await api.createReservation(payload);
+    setBusy(btn, false);
+    if (!res || !res.ok) {
+      if (res && res.code === 'RESERVATION_CONFLICT' && res.conflict) {
+        const editExisting = window.confirm(`${res.message}\n\nOpen ${res.conflict.resId} for editing now?`);
+        if (editExisting) {
+          closeModal();
+          openReservationModal(res.conflict.resId);
+        }
+      } else {
+        toast((res && res.message) || 'Reservation failed', 'error');
+      }
+      return;
+    }
+    mergeAppData(res.data);
+    rerenderReservationsOnly();
+    rerenderRoomsOnly();
+    rerenderReportsOnly();
+    closeModal();
+    toast(res.message || 'Reservation saved', 'success');
+  } catch (err) {
+    setBusy(btn, false);
+    toast((err && err.message) || 'Reservation failed', 'error');
+  }
 }
 
 function renderReservations(){

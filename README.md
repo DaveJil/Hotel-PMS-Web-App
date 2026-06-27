@@ -14,13 +14,15 @@ Offline-first hotel property management desktop application built with Electron,
 - Reports and receipts
 - User administration
 - Optional Google Sheets background sync
+- Local backdated entry portal
 - Offline email queue with automatic SMTP delivery
 
 ## Offline Behavior
 
 Hotel operations are written to SQLite first and continue without internet.
 
-- Google Sheets changes are placed in `SyncQueue`.
+- Local changes are placed in `SyncQueue`.
+- Online refresh pushes pending local changes and then pulls current Google Sheets data.
 - Emails are placed in `EmailQueue`.
 - Background workers retry queued work every 60 seconds.
 - WhatsApp and PDF actions display an internet-required confirmation.
@@ -53,7 +55,16 @@ The Windows x64 installer is generated in `dist/`.
 6. Enter the spreadsheet ID and service-account JSON file path.
 7. Enable sync, save, queue a full sync, and run sync.
 
-SQLite is authoritative. Queued table snapshots replace the matching Google Sheet tab contents.
+Pending local table snapshots are pushed first. The app then pulls the matching Google Sheet tabs into SQLite. Pulls that contain overlapping active room reservations are rejected until the conflicting spreadsheet reservation is corrected.
+
+## Backdated Entry Portal
+
+Select **Backdated Entry Portal** on the login screen. The portal supports historical reservations, payments, stay extensions, checkouts, and late-checkout fees.
+
+```text
+Username: backdated
+Password: backdate123
+```
 
 ## Email Queue
 
@@ -72,5 +83,7 @@ For Gmail, use `smtp.gmail.com`, port `587`, STARTTLS, and a Google app password
 
 ```text
 Username: admin
-Password: 1234
+Password: 6585
 ```
+
+The remaining staff accounts are migrated from the `Users` sheet in `hotel pms.xlsx`.

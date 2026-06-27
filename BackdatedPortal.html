@@ -430,19 +430,41 @@ var PORTAL = {
 
 var APARTMENT_RATE = 300000;
 
+function portalCall(method, args, onSuccess, onFailure){
+  var api = window.api;
+  if (!api || typeof api[method] !== 'function') {
+    if (onFailure) onFailure(new Error('Local portal API is unavailable.'));
+    return;
+  }
+  api[method].apply(api, args || [])
+    .then(function(res){ if (onSuccess) onSuccess(res); })
+    .catch(function(err){ if (onFailure) onFailure(err); });
+}
+
+function refreshPortalEntries(onSuccess, onFailure){
+  portalCall('getSyncStatus', [], function(status){
+    if (status && status.enabled && status.configured) {
+      portalCall('runSyncNow', [], function(){
+        portalCall('getBackdatedEntries', [], onSuccess, onFailure);
+      }, onFailure);
+      return;
+    }
+    portalCall('getBackdatedEntries', [], onSuccess, onFailure);
+  }, function(){
+    portalCall('getBackdatedEntries', [], onSuccess, onFailure);
+  });
+}
+
 /* ═══════════════════════════════════════════════════
    BOOT
 ═══════════════════════════════════════════════════ */
 document.addEventListener('DOMContentLoaded', function(){
   // Check if there's a live session already
-  google.script.run
-    .withSuccessHandler(function(res){
+  portalCall('getPortalBootstrap', [], function(res){
       if (res && res.ok && res.user && res.user.role === 'Backdated') {
         bootApp(res);
       }
-    })
-    .withFailureHandler(function(){})
-    .getPortalBootstrap();
+    }, function(){});
 });
 
 /* ═══════════════════════════════════════════════════
@@ -454,20 +476,17 @@ function doPortalLogin(btn){
   if (!u || !p){ toast('Enter credentials.','error'); return; }
 
   setBusy(btn, true);
-  google.script.run
-    .withSuccessHandler(function(res){
+  portalCall('portalLogin', [u, p], function(res){
       setBusy(btn, false);
       if (!res || !res.ok){ toast(res ? res.message : 'Login failed','error'); return; }
       if (res.user.role !== 'Backdated'){
         toast('Access denied — Backdated role required.','error'); return;
       }
       bootApp(res);
-    })
-    .withFailureHandler(function(err){
+    }, function(err){
       setBusy(btn, false);
       toast((err && err.message) || 'Login failed','error');
-    })
-    .portalLogin(u, p);
+    });
 }
 
 function bootApp(res){
@@ -482,10 +501,7 @@ function bootApp(res){
 }
 
 function doLogout(){
-  google.script.run
-    .withSuccessHandler(function(){ location.reload(); })
-    .withFailureHandler(function(){ location.reload(); })
-    .portalLogout();
+  portalCall('portalLogout', [], function(){ location.reload(); }, function(){ location.reload(); });
 }
 
 /* ═══════════════════════════════════════════════════
@@ -509,16 +525,13 @@ function loadHistory(){
   var tbody = document.getElementById('historyBody');
   tbody.innerHTML = '<tr class="empty-row"><td colspan="9"><span class="loading-spinner"></span></td></tr>';
 
-  google.script.run
-    .withSuccessHandler(function(res){
+  refreshPortalEntries(function(res){
       if (!res || !res.ok){ tbody.innerHTML = '<tr class="empty-row"><td colspan="9">Failed to load.</td></tr>'; return; }
       PORTAL.history = res.rows || [];
       renderHistory(PORTAL.history);
-    })
-    .withFailureHandler(function(){
+    }, function(){
       tbody.innerHTML = '<tr class="empty-row"><td colspan="9">Error loading history.</td></tr>';
-    })
-    .getBackdatedEntries();
+    });
 }
 
 function renderHistory(rows){
@@ -555,8 +568,7 @@ function typeBadge(t){
    SUMMARY
 ═══════════════════════════════════════════════════ */
 function loadSummary(){
-  google.script.run
-    .withSuccessHandler(function(res){
+  refreshPortalEntries(function(res){
       if (!res || !res.ok) return;
       var rows = res.rows || [];
       var total = rows.length;
@@ -586,9 +598,7 @@ function loadSummary(){
       tbody.innerHTML = months.map(function(m){
         return '<tr><td>'+esc(m)+'</td><td>'+byMonth[m].entries+'</td><td style="color:var(--gold)">'+fmtMoney(byMonth[m].revenue)+'</td></tr>';
       }).join('');
-    })
-    .withFailureHandler(function(){})
-    .getBackdatedEntries();
+    }, function(){});
 }
 
 /* ═══════════════════════════════════════════════════
@@ -642,18 +652,15 @@ function lookupRes(resIdElId, callback){
   // Normalise — user may type "res0001" lowercase
   document.getElementById(resIdElId).value = resId;
 
-  google.script.run
-    .withSuccessHandler(function(res){
+  portalCall('lookupReservationForPortal', [resId], function(res){
       if (!res || !res.ok){
         toast('Reservation "' + resId + '" not found.', 'error');
         return;
       }
       callback(res.data);
-    })
-    .withFailureHandler(function(err){
+    }, function(err){
       toast((err && err.message) || 'Lookup failed.', 'error');
-    })
-    .lookupReservationForPortal(resId);
+    });
 }
 
 /* ═══════════════════════════════════════════════════
@@ -782,18 +789,19 @@ function submitReservationEntry(btn){
   if (!payload.txDate)                   return toast('Original transaction date is required.', 'error');
 
   setBusy(btn, true);
-  google.script.run
-    .withSuccessHandler(function(res){
+  portalCall('saveBackdatedEntry', [payload], function(res){
       setBusy(btn, false);
-      if (!res || !res.ok){ toast(res ? res.message : 'Save failed', 'error'); return; }
+      if (!res || !res.ok){
+        if (res && res.code === 'RESERVATION_CONFLICT') window.alert(res.message);
+        else toast(res ? res.message : 'Save failed', 'error');
+        return;
+      }
       toast('Reservation saved. Res ID: ' + res.resId, 'success');
       closeForm();
-    })
-    .withFailureHandler(function(err){
+    }, function(err){
       setBusy(btn, false);
       toast((err && err.message) || 'Save failed', 'error');
-    })
-    .saveBackdatedEntry(payload);
+    });
 }
 
 /* ═══════════════════════════════════════════════════
@@ -885,18 +893,15 @@ function submitPaymentEntry(btn){
   };
 
   setBusy(btn, true);
-  google.script.run
-    .withSuccessHandler(function(res){
+  portalCall('saveBackdatedEntry', [payload], function(res){
       setBusy(btn, false);
       if (!res || !res.ok){ toast(res ? res.message : 'Save failed', 'error'); return; }
       toast('Payment saved. Pay ID: ' + res.entryId, 'success');
       closeForm();
-    })
-    .withFailureHandler(function(err){
+    }, function(err){
       setBusy(btn, false);
       toast((err && err.message) || 'Save failed', 'error');
-    })
-    .saveBackdatedEntry(payload);
+    });
 }
 
 /* ═══════════════════════════════════════════════════
@@ -976,18 +981,15 @@ function submitExtensionEntry(btn){
   };
 
   setBusy(btn, true);
-  google.script.run
-    .withSuccessHandler(function(res){
+  portalCall('saveBackdatedEntry', [payload], function(res){
       setBusy(btn, false);
       if (!res || !res.ok){ toast(res ? res.message : 'Save failed', 'error'); return; }
       toast('Extension saved.' + (res.entryId ? ' Pay ID: ' + res.entryId : ''), 'success');
       closeForm();
-    })
-    .withFailureHandler(function(err){
+    }, function(err){
       setBusy(btn, false);
       toast((err && err.message) || 'Save failed', 'error');
-    })
-    .saveBackdatedEntry(payload);
+    });
 }
 
 /* ═══════════════════════════════════════════════════
@@ -1065,18 +1067,15 @@ function submitCheckoutEntry(btn){
   };
 
   setBusy(btn, true);
-  google.script.run
-    .withSuccessHandler(function(res){
+  portalCall('saveBackdatedEntry', [payload], function(res){
       setBusy(btn, false);
       if (!res || !res.ok){ toast(res ? res.message : 'Save failed', 'error'); return; }
       toast('Checkout record saved.', 'success');
       closeForm();
-    })
-    .withFailureHandler(function(err){
+    }, function(err){
       setBusy(btn, false);
       toast((err && err.message) || 'Save failed', 'error');
-    })
-    .saveBackdatedEntry(payload);
+    });
 }
 
 /* ═══════════════════════════════════════════════════
@@ -1151,18 +1150,15 @@ function submitLateCheckoutEntry(btn){
   };
 
   setBusy(btn, true);
-  google.script.run
-    .withSuccessHandler(function(res){
+  portalCall('saveBackdatedEntry', [payload], function(res){
       setBusy(btn, false);
       if (!res || !res.ok){ toast(res ? res.message : 'Save failed', 'error'); return; }
       toast('Late checkout fee saved. Pay ID: ' + res.entryId, 'success');
       closeForm();
-    })
-    .withFailureHandler(function(err){
+    }, function(err){
       setBusy(btn, false);
       toast((err && err.message) || 'Save failed', 'error');
-    })
-    .saveBackdatedEntry(payload);
+    });
 }
 
 /* ═══════════════════════════════════════════════════

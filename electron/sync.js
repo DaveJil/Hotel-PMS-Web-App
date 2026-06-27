@@ -93,6 +93,12 @@ const TABLES = {
     columns: ['setting', 'value'],
     headers: ['Setting', 'Value'],
     orderBy: 'setting'
+  },
+  BackdatedEntryLog: {
+    sheet: 'Backdated Entry Log',
+    columns: ['entry_id', 'entry_type', 'res_id', 'guest_name', 'room_no', 'amount', 'transaction_date', 'entered_by', 'note', 'logged_at'],
+    headers: ['Entry ID', 'Entry Type', 'Res ID', 'Guest Name', 'Room No', 'Amount', 'Transaction Date', 'Entered By', 'Note', 'Logged At'],
+    orderBy: 'logged_at'
   }
 };
 
@@ -259,6 +265,99 @@ async function pushTableSnapshot(sheets, spreadsheetId, tableName) {
   });
 }
 
+function normalizeHeader(value) {
+  return String(value == null ? '' : value).trim().toLowerCase();
+}
+
+function validateIncomingReservations(records) {
+  const active = records.filter((row) => ['reserved', 'checked in'].includes(String(row.status || '').toLowerCase()));
+  const rooms = getDb().prepare('SELECT room_no, apartment_group FROM Rooms').all();
+
+  function physicalRooms(unitNo) {
+    const group = rooms.filter((room) => String(room.apartment_group || '') === String(unitNo));
+    if (group.length) return group.map((room) => String(room.room_no));
+    const room = rooms.find((item) => String(item.room_no) === String(unitNo));
+    return room && room.apartment_group
+      ? [String(room.room_no), `group:${room.apartment_group}`]
+      : [String(unitNo)];
+  }
+
+  function dateOnly(value) {
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+
+  for (let i = 0; i < active.length; i += 1) {
+    for (let j = i + 1; j < active.length; j += 1) {
+      const first = active[i];
+      const second = active[j];
+      const firstUnits = physicalRooms(first.room_no);
+      const secondUnits = physicalRooms(second.room_no);
+      const sameUnit = firstUnits.some((unit) => secondUnits.includes(unit))
+        || firstUnits.includes(`group:${second.room_no}`)
+        || secondUnits.includes(`group:${first.room_no}`);
+      if (!sameUnit) continue;
+
+      const firstStart = dateOnly(first.check_in);
+      const firstEnd = dateOnly(first.check_out);
+      const secondStart = dateOnly(second.check_in);
+      const secondEnd = dateOnly(second.check_out);
+      if (!firstStart || !firstEnd || !secondStart || !secondEnd) {
+        throw new Error(`Google Sheets contains invalid reservation dates in ${first.res_id} or ${second.res_id}.`);
+      }
+      if (firstStart < secondEnd && firstEnd > secondStart) {
+        throw new Error(
+          `Google Sheets contains overlapping active reservations ${first.res_id} and ${second.res_id} for ${first.room_no}. Edit the conflicting reservation before pulling.`
+        );
+      }
+    }
+  }
+}
+
+async function pullTableSnapshot(sheets, spreadsheetId, tableName) {
+  const def = TABLES[tableName];
+  let response;
+  try {
+    response = await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range: `${quoteSheetName(def.sheet)}!A:ZZ`
+    });
+  } catch (err) {
+    const message = err && err.message ? err.message : String(err);
+    if (/unable to parse range|requested entity was not found/i.test(message)) return { skipped: true };
+    throw err;
+  }
+
+  const values = response.data.values || [];
+  if (!values.length) return { skipped: true };
+  const headerIndexes = new Map(values[0].map((header, index) => [normalizeHeader(header), index]));
+  const missing = def.headers.filter((header) => !headerIndexes.has(normalizeHeader(header)));
+  if (missing.length) {
+    throw new Error(`${def.sheet} is missing required column(s): ${missing.join(', ')}`);
+  }
+
+  const records = values.slice(1)
+    .filter((row) => row.some((value) => String(value == null ? '' : value).trim() !== ''))
+    .map((row) => Object.fromEntries(def.columns.map((column, index) => [
+      column,
+      row[headerIndexes.get(normalizeHeader(def.headers[index]))] == null
+        ? ''
+        : row[headerIndexes.get(normalizeHeader(def.headers[index]))]
+    ])));
+
+  if (tableName === 'Reservations') validateIncomingReservations(records);
+
+  const placeholders = def.columns.map(() => '?').join(', ');
+  const insert = getDb().prepare(
+    `INSERT INTO ${tableName} (${def.columns.join(', ')}) VALUES (${placeholders})`
+  );
+  getDb().transaction(() => {
+    getDb().prepare(`DELETE FROM ${tableName}`).run();
+    records.forEach((record) => insert.run(def.columns.map((column) => record[column])));
+  })();
+  return { pulled: records.length };
+}
+
 async function processSyncQueue(options = {}) {
   if (syncRunning) return getSyncStatus();
   const config = loadConfig();
@@ -294,7 +393,20 @@ async function processSyncQueue(options = {}) {
       }
     }
 
-    setState('lastStatus', pending.length ? `Synced ${pending.length} table snapshot(s)` : 'Nothing to sync');
+    let pulledTables = 0;
+    let pulledRows = 0;
+    for (const tableName of Object.keys(TABLES)) {
+      const result = await pullTableSnapshot(sheets, config.spreadsheetId, tableName);
+      if (!result.skipped) {
+        pulledTables += 1;
+        pulledRows += result.pulled || 0;
+      }
+    }
+
+    setState(
+      'lastStatus',
+      `Online sync complete: pushed ${pending.length} table(s), pulled ${pulledRows} row(s) from ${pulledTables} table(s)`
+    );
     setState('lastSyncAt', new Date().toISOString());
     setState('lastError', '');
     return getSyncStatus();

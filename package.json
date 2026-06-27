@@ -24,6 +24,7 @@
     "files": [
       "electron/**/*",
       "renderer/**/*",
+      "BackdatedPortal.html",
       "database/schema.sql",
       "package.json"
     ],

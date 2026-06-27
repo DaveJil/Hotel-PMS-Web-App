@@ -31,6 +31,32 @@ function getSchemaPath() {
 
 let db;
 
+function migrateUsersTable(database) {
+  const table = database
+    .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'Users'")
+    .get();
+  if (!table || !/\busername\s+TEXT[^,]*\bUNIQUE\b/i.test(table.sql || '')) return;
+
+  database.exec(`
+    PRAGMA foreign_keys = OFF;
+    BEGIN;
+    CREATE TABLE Users_migrated (
+      user_id TEXT PRIMARY KEY,
+      username TEXT NOT NULL COLLATE NOCASE,
+      password TEXT NOT NULL,
+      full_name TEXT NOT NULL DEFAULT '',
+      role TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'Active'
+    );
+    INSERT INTO Users_migrated (user_id, username, password, full_name, role, status)
+      SELECT user_id, username, password, full_name, role, status FROM Users;
+    DROP TABLE Users;
+    ALTER TABLE Users_migrated RENAME TO Users;
+    COMMIT;
+    PRAGMA foreign_keys = ON;
+  `);
+}
+
 function getDb() {
   if (!db) {
     const dbPath = getDatabasePath();
@@ -45,6 +71,7 @@ function initDatabase() {
   const database = getDb();
   const schemaPath = getSchemaPath();
   const schema = fs.readFileSync(schemaPath, 'utf8');
+  migrateUsersTable(database);
   database.exec(schema);
   resetNonRoomAreasDaily(database);
   return database;
