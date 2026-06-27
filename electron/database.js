@@ -57,6 +57,43 @@ function migrateUsersTable(database) {
   `);
 }
 
+function importWorkbookUsersOnce(database) {
+  const marker = database
+    .prepare("SELECT value FROM Setup WHERE setting = 'Workbook Users Imported v1'")
+    .get();
+  if (marker) return;
+
+  const users = [
+    ['U001', 'admin', '6585', 'System Admin', 'Admin', 'Active'],
+    ['U002', 'princesscherri', 'princess123', 'Princess Ndiukwu', 'Front Desk', 'Active'],
+    ['U003', 'josiaho', '8907', 'Josiah Onyomo', 'Housekeeping', 'Active'],
+    ['U004', 'abdallataleb', '8912', 'Abdalla Taleb', 'Manager', 'Active'],
+    ['U005', 'ezefranca', '8910', 'Eze Franca', 'Front Desk', 'Inactive'],
+    ['U006', 'preciousd', '8031', 'Daka Precious', 'Housekeeping', 'Active'],
+    ['U007', 'juiletb', '8341', 'Juliet Anderson', 'Housekeeping', 'Active'],
+    ['U0008', 'Testuser', '9876', 'Test User', 'Front Desk', 'Active'],
+    ['U0009', 'Testcleean', '6789', 'cleantest', 'Housekeeping', 'Active'],
+    ['U010', 'backdated', 'backdate123', 'Backdated Staff', 'Backdated', 'Active'],
+    ['U011', 'nkechisam', '7864', 'Nkechi Samuel Nwogu', 'Front Desk', 'Active'],
+    ['U012', 'princesscherri', 'cherri123', 'Princess Ndiukwu', 'Backdated', 'Active'],
+    ['U013', 'abigailnddc', '2560', 'Abigail NDDC', 'Manager', 'Active']
+  ];
+  const upsert = database.prepare(`
+    INSERT INTO Users (user_id, username, password, full_name, role, status)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(user_id) DO UPDATE SET
+      username = excluded.username,
+      password = excluded.password,
+      full_name = excluded.full_name,
+      role = excluded.role,
+      status = excluded.status
+  `);
+  database.transaction(() => {
+    users.forEach((user) => upsert.run(user));
+    database.prepare("INSERT INTO Setup (setting, value) VALUES ('Workbook Users Imported v1', ?)").run(new Date().toISOString());
+  })();
+}
+
 function getDb() {
   if (!db) {
     const dbPath = getDatabasePath();
@@ -73,6 +110,7 @@ function initDatabase() {
   const schema = fs.readFileSync(schemaPath, 'utf8');
   migrateUsersTable(database);
   database.exec(schema);
+  importWorkbookUsersOnce(database);
   resetNonRoomAreasDaily(database);
   return database;
 }

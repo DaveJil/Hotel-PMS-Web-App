@@ -283,7 +283,7 @@ INSERT OR IGNORE INTO Setup (setting, value) VALUES
   ('Tagline', 'Redefining Luxury Living'),
   ('Logo Data Uri', '');
 
-INSERT INTO Users (user_id, username, password, full_name, role, status) VALUES
+INSERT OR IGNORE INTO Users (user_id, username, password, full_name, role, status) VALUES
   ('U001', 'admin', '6585', 'System Admin', 'Admin', 'Active'),
   ('U002', 'princesscherri', 'princess123', 'Princess Ndiukwu', 'Front Desk', 'Active'),
   ('U003', 'josiaho', '8907', 'Josiah Onyomo', 'Housekeeping', 'Active'),
@@ -296,13 +296,7 @@ INSERT INTO Users (user_id, username, password, full_name, role, status) VALUES
   ('U010', 'backdated', 'backdate123', 'Backdated Staff', 'Backdated', 'Active'),
   ('U011', 'nkechisam', '7864', 'Nkechi Samuel Nwogu', 'Front Desk', 'Active'),
   ('U012', 'princesscherri', 'cherri123', 'Princess Ndiukwu', 'Backdated', 'Active'),
-  ('U013', 'abigailnddc', '2560', 'Abigail NDDC', 'Manager', 'Active')
-ON CONFLICT(user_id) DO UPDATE SET
-  username = excluded.username,
-  password = excluded.password,
-  full_name = excluded.full_name,
-  role = excluded.role,
-  status = excluded.status;
+  ('U013', 'abigailnddc', '2560', 'Abigail NDDC', 'Manager', 'Active');
 
 INSERT OR IGNORE INTO Roles (role_id, role_name, description, status) VALUES
   ('R001', 'Admin', 'Full access', 'Active'),
