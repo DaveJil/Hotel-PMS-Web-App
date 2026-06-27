@@ -1,5 +1,19 @@
 const { ipcMain } = require('electron');
+const dns = require('dns').promises;
 const { getDb } = require('./database');
+const {
+  enqueueAllTables,
+  getSyncStatus,
+  processSyncQueue,
+  saveConfig,
+  enqueueTables
+} = require('./sync');
+const {
+  getEmailStatus,
+  processEmailQueue,
+  queueEmail,
+  saveEmailConfig
+} = require('./email');
 
 let currentUser = null;
 
@@ -319,6 +333,7 @@ function makeId(prefix, table, idColumn) {
 }
 
 function okWithBootstrap(message) {
+  enqueueAllTables();
   return { ok: true, message, data: getAppBootstrap() };
 }
 
@@ -451,6 +466,56 @@ function validateReservation(payload) {
   if (Number(payload.adults || 0) > 2) throw new Error('Not allowed by management. Adults cannot be more than 2.');
 }
 
+function escapeHtml(value) {
+  return String(value == null ? '' : value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function reservationEmailHtml(title, data) {
+  return `
+    <div style="font-family:Arial,sans-serif;color:#111;line-height:1.5">
+      <div style="max-width:680px;margin:0 auto;border:1px solid #ddd;border-radius:12px;overflow:hidden">
+        <div style="background:#111;color:#fff;padding:20px">
+          <h2 style="margin:0">${escapeHtml(getBranding().hotelName)}</h2>
+          <div style="margin-top:6px">${escapeHtml(title)}</div>
+        </div>
+        <div style="padding:22px">
+          <p>Dear ${escapeHtml(data.guestName || 'Guest')},</p>
+          <table style="width:100%;border-collapse:collapse">
+            <tr><td style="padding:8px;border:1px solid #ddd"><strong>Reservation ID</strong></td><td style="padding:8px;border:1px solid #ddd">${escapeHtml(data.resId)}</td></tr>
+            <tr><td style="padding:8px;border:1px solid #ddd"><strong>Room</strong></td><td style="padding:8px;border:1px solid #ddd">${escapeHtml(data.roomNo)} - ${escapeHtml(data.roomType)}</td></tr>
+            <tr><td style="padding:8px;border:1px solid #ddd"><strong>Check In</strong></td><td style="padding:8px;border:1px solid #ddd">${escapeHtml(data.checkIn)}</td></tr>
+            <tr><td style="padding:8px;border:1px solid #ddd"><strong>Check Out</strong></td><td style="padding:8px;border:1px solid #ddd">${escapeHtml(data.checkOut)}</td></tr>
+            <tr><td style="padding:8px;border:1px solid #ddd"><strong>Amount</strong></td><td style="padding:8px;border:1px solid #ddd">NGN ${Number(data.netAmount || 0).toLocaleString()}</td></tr>
+          </table>
+          <p>Thank you for choosing ${escapeHtml(getBranding().hotelName)}.</p>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function queueReservationEmail(title, row) {
+  if (!row || !String(row.email || '').trim()) return;
+  queueEmail({
+    recipient: row.email,
+    subject: `${title} - ${row.res_id}`,
+    htmlBody: reservationEmailHtml(title, {
+      resId: row.res_id,
+      guestName: row.guest_name,
+      roomNo: row.room_no,
+      roomType: row.room_type,
+      checkIn: formatDateOnly(row.check_in),
+      checkOut: formatDateOnly(row.check_out),
+      netAmount: row.net_amount
+    })
+  });
+}
+
 function reservationAmounts(payload) {
   const grouped = apartmentRooms(payload.roomNo);
   const isApartmentBooking = grouped.length > 0;
@@ -493,6 +558,7 @@ function createReservationLocal(payload) {
     `).run(resId, payload.guestName, payload.phone || '', payload.email || '', payload.roomNo, totals.roomType, payload.checkIn, payload.checkOut, totals.nights, Number(payload.adults || 1), totals.rate, discountPct, discountPct > 0 ? 'Yes' : 'No', totals.netAmount, payload.channel || 'Walk-in', paymentStatus, payload.rrrNumber || '', userName, payload.notes || '', createdAt, createdAt);
     const row = getReservationRow(resId);
     upsertReservationPayment(row, paymentStatus, payload.rrrNumber || '');
+    queueReservationEmail('Reservation Confirmation', row);
     audit('Create Reservation', currentUser.username, `${resId} created`);
     return okWithBootstrap('Reservation created successfully.');
   } catch (err) {
@@ -525,6 +591,7 @@ function updateReservationLocal(resId, payload) {
       WHERE res_id = ?
     `).run(payload.guestName, payload.phone || '', payload.email || '', payload.roomNo, totals.roomType, payload.checkIn, payload.checkOut, totals.nights, Number(payload.adults || 1), totals.rate, discountPct, discountPct > 0 ? 'Yes' : 'No', totals.netAmount, payload.channel || 'Walk-in', paymentStatus, payload.rrrNumber || '', payload.notes || '', nowIso(), resId);
     upsertReservationPayment(getReservationRow(resId), paymentStatus, payload.rrrNumber || '');
+    queueReservationEmail('Reservation Updated', getReservationRow(resId));
     audit('Update Reservation', currentUser.username, `${resId} updated`);
     return okWithBootstrap('Reservation updated successfully.');
   } catch (err) {
@@ -847,6 +914,42 @@ function checkoutReceiptData(resId) {
   };
 }
 
+function checkoutReceiptEmailHtml(data) {
+  const paymentRows = (data.payments || []).map((payment) => `
+    <tr>
+      <td style="padding:8px;border:1px solid #ddd">${escapeHtml(payment.paymentType)}</td>
+      <td style="padding:8px;border:1px solid #ddd">NGN ${Number(payment.amount || 0).toLocaleString()}</td>
+      <td style="padding:8px;border:1px solid #ddd">${escapeHtml(payment.paymentDate)}</td>
+    </tr>
+  `).join('');
+
+  return `
+    <div style="font-family:Arial,sans-serif;color:#111;line-height:1.5">
+      <div style="max-width:760px;margin:0 auto;border:1px solid #ddd;border-radius:12px;overflow:hidden">
+        <div style="background:#111;color:#fff;padding:20px">
+          <h2 style="margin:0">${escapeHtml(getBranding().hotelName)}</h2>
+          <div style="margin-top:6px">Checkout Receipt</div>
+        </div>
+        <div style="padding:22px">
+          <p>Dear ${escapeHtml(data.guestName || 'Guest')},</p>
+          <table style="width:100%;border-collapse:collapse;margin-bottom:18px">
+            <tr><td style="padding:8px;border:1px solid #ddd"><strong>Reservation ID</strong></td><td style="padding:8px;border:1px solid #ddd">${escapeHtml(data.resId)}</td></tr>
+            <tr><td style="padding:8px;border:1px solid #ddd"><strong>Room</strong></td><td style="padding:8px;border:1px solid #ddd">${escapeHtml(data.roomNo)} - ${escapeHtml(data.roomType)}</td></tr>
+            <tr><td style="padding:8px;border:1px solid #ddd"><strong>Stay</strong></td><td style="padding:8px;border:1px solid #ddd">${escapeHtml(data.checkIn)} to ${escapeHtml(data.checkOut)}</td></tr>
+            <tr><td style="padding:8px;border:1px solid #ddd"><strong>Total Paid</strong></td><td style="padding:8px;border:1px solid #ddd">NGN ${Number(data.totalPaid || 0).toLocaleString()}</td></tr>
+            <tr><td style="padding:8px;border:1px solid #ddd"><strong>Payment Status</strong></td><td style="padding:8px;border:1px solid #ddd">${escapeHtml(data.paymentStatus)}</td></tr>
+          </table>
+          <h3>Payments</h3>
+          <table style="width:100%;border-collapse:collapse">
+            <thead><tr><th style="padding:8px;border:1px solid #ddd">Type</th><th style="padding:8px;border:1px solid #ddd">Amount</th><th style="padding:8px;border:1px solid #ddd">Date</th></tr></thead>
+            <tbody>${paymentRows || '<tr><td colspan="3" style="padding:8px;border:1px solid #ddd">No payment records</td></tr>'}</tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
 function simplePdfResponse(title, lines, fileStem) {
   const text = [title, '', ...(lines || [])].join('\n').replace(/[()\\]/g, '\\$&');
   const stream = `BT /F1 12 Tf 50 780 Td (${text.replace(/\n/g, ') Tj 0 -16 Td (')}) Tj ET`;
@@ -861,9 +964,27 @@ function simplePdfResponse(title, lines, fileStem) {
   };
 }
 
+async function onlinePdfResponse(title, lines, fileStem) {
+  try {
+    await dns.lookup('google.com');
+  } catch (err) {
+    return { ok: false, message: 'Internet connection is required to generate this PDF.' };
+  }
+  return simplePdfResponse(title, lines, fileStem);
+}
+
 function registerApiHandlers() {
   const handlers = {
-    checkMailAuthorization: () => ({ ok: false, message: 'Email sending is not available in the offline desktop build yet.' }),
+    checkMailAuthorization: () => {
+      const status = getEmailStatus();
+      return {
+        ok: status.configured,
+        queuedDelivery: true,
+        message: status.configured
+          ? 'Email is configured. Messages will queue offline and send when internet is available.'
+          : 'SMTP email is not configured in Admin.'
+      };
+    },
     createReservation: (_event, payload) => createReservationLocal(payload),
     updateReservation: (_event, resId, payload) => updateReservationLocal(resId, payload),
     processReservationAction: (_event, resId, action) => processReservationActionLocal(resId, action),
@@ -884,16 +1005,28 @@ function registerApiHandlers() {
     getCheckoutReceiptData: (_event, resId) => {
       try { return { ok: true, data: checkoutReceiptData(resId) }; } catch (err) { return { ok: false, message: err.message }; }
     },
-    buildCheckoutReceiptPdf: (_event, payload) => {
+    buildCheckoutReceiptPdf: async (_event, payload) => {
       try {
         const data = checkoutReceiptData(payload.resId);
-        return simplePdfResponse('Checkout Receipt', [`Reservation: ${data.resId}`, `Guest: ${data.guestName}`, `Room: ${data.roomNo}`, `Total Paid: ${data.totalPaid}`], 'checkout-receipt');
+        return onlinePdfResponse('Checkout Receipt', [`Reservation: ${data.resId}`, `Guest: ${data.guestName}`, `Room: ${data.roomNo}`, `Total Paid: ${data.totalPaid}`], 'checkout-receipt');
       } catch (err) { return { ok: false, message: err.message }; }
     },
-    emailCheckoutReceipt: () => ({ ok: false, message: 'Email sending is not available in the offline desktop build yet.' }),
-    downloadBookingPaymentReportPdf: (_event, payload) => simplePdfResponse('Booking and Payment Report', [`Range: ${(payload && payload.startDate) || 'Beginning'} to ${(payload && payload.endDate) || 'Today'}`, `Bookings: ${getBookingHistory().length}`, `Payments: ${getPaymentHistory().length}`], 'booking-payment-report'),
-    downloadCleaningReportPdf: () => simplePdfResponse('Cleaning Report', [`Room sessions: ${getCleaningHistory().length}`, `Non-room sessions: ${getNonRoomCleaningHistory().length}`], 'cleaning-report'),
-    downloadFinancialReport: (_event, startDate, endDate) => simplePdfResponse('Financial Report', [`Range: ${startDate || 'Beginning'} to ${endDate || 'Today'}`, `Payment total: ${getPaymentHistory().reduce((sum, p) => sum + Number(p.amount || 0), 0)}`], 'financial-report'),
+    emailCheckoutReceipt: (_event, payload) => {
+      try {
+        const data = checkoutReceiptData(payload.resId);
+        const recipient = String(payload.email || data.email || '').trim();
+        return queueEmail({
+          recipient,
+          subject: `Checkout Receipt - ${data.resId}`,
+          htmlBody: checkoutReceiptEmailHtml(data)
+        });
+      } catch (err) {
+        return { ok: false, message: err.message };
+      }
+    },
+    downloadBookingPaymentReportPdf: (_event, payload) => onlinePdfResponse('Booking and Payment Report', [`Range: ${(payload && payload.startDate) || 'Beginning'} to ${(payload && payload.endDate) || 'Today'}`, `Bookings: ${getBookingHistory().length}`, `Payments: ${getPaymentHistory().length}`], 'booking-payment-report'),
+    downloadCleaningReportPdf: () => onlinePdfResponse('Cleaning Report', [`Room sessions: ${getCleaningHistory().length}`, `Non-room sessions: ${getNonRoomCleaningHistory().length}`], 'cleaning-report'),
+    downloadFinancialReport: (_event, startDate, endDate) => onlinePdfResponse('Financial Report', [`Range: ${startDate || 'Beginning'} to ${endDate || 'Today'}`, `Payment total: ${getPaymentHistory().reduce((sum, p) => sum + Number(p.amount || 0), 0)}`], 'financial-report'),
     createMaintenanceLog: (_event, payload) => createMaintenanceLogLocal(payload),
     createUser: (_event, payload) => createUserLocal(payload),
     resolveMaintenanceLog: (_event, logId, status) => resolveMaintenanceLogLocal(logId, status)
@@ -931,6 +1064,17 @@ function getAppBootstrap() {
 
 function registerIpcHandlers() {
   registerApiHandlers();
+
+  ipcMain.handle('sync:getStatus', () => getSyncStatus());
+  ipcMain.handle('sync:saveConfig', (_event, payload) => saveConfig(payload || {}));
+  ipcMain.handle('sync:enqueueFull', () => {
+    enqueueAllTables();
+    return getSyncStatus();
+  });
+  ipcMain.handle('sync:runNow', () => processSyncQueue({ force: true }));
+  ipcMain.handle('email:getStatus', () => getEmailStatus());
+  ipcMain.handle('email:saveConfig', (_event, payload) => saveEmailConfig(payload || {}));
+  ipcMain.handle('email:runNow', () => processEmailQueue({ force: true }));
 
   ipcMain.handle('auth:login', (_event, username, password) => {
     try {

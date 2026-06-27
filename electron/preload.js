@@ -33,5 +33,12 @@ contextBridge.exposeInMainWorld('api', {
   createMaintenanceLog: (payload) => invoke('api:createMaintenanceLog', payload),
   updatePayment: (payload) => invoke('api:updatePayment', payload),
   createUser: (payload) => invoke('api:createUser', payload),
-  resolveMaintenanceLog: (logId, status) => invoke('api:resolveMaintenanceLog', logId, status)
+  resolveMaintenanceLog: (logId, status) => invoke('api:resolveMaintenanceLog', logId, status),
+  getSyncStatus: () => invoke('sync:getStatus'),
+  saveSyncConfig: (payload) => invoke('sync:saveConfig', payload),
+  enqueueFullSync: () => invoke('sync:enqueueFull'),
+  runSyncNow: () => invoke('sync:runNow'),
+  getEmailStatus: () => invoke('email:getStatus'),
+  saveEmailConfig: (payload) => invoke('email:saveConfig', payload),
+  runEmailQueueNow: () => invoke('email:runNow')
 });

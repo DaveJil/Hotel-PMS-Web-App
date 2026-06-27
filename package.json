@@ -2,17 +2,20 @@
   "name": "hotel-pms",
   "version": "0.1.0",
   "description": "Offline desktop Hotel PMS migrated from Google Apps Script.",
+  "author": "NDDC Clubhouse",
   "main": "electron/main.js",
   "scripts": {
     "start": "electron .",
     "db:init": "node -e \"require('./electron/database').initDatabase()\"",
-    "build:win": "electron-builder --win"
+    "build:win": "electron-builder --win nsis --x64"
   },
   "dependencies": {
     "better-sqlite3": "^11.10.0",
-    "electron": "^35.0.0"
+    "googleapis": "^144.0.0",
+    "nodemailer": "^6.9.16"
   },
   "devDependencies": {
+    "electron": "^35.7.5",
     "electron-builder": "^26.0.12"
   },
   "build": {
@@ -24,6 +27,9 @@
       "database/schema.sql",
       "package.json"
     ],
+    "asarUnpack": [
+      "node_modules/better-sqlite3/**/*"
+    ],
     "extraResources": [
       {
         "from": "database/schema.sql",
@@ -31,7 +37,8 @@
       }
     ],
     "win": {
-      "target": "nsis"
+      "target": "nsis",
+      "artifactName": "${productName}-Setup-${version}-${arch}.${ext}"
     }
   }
 }

@@ -17,6 +17,8 @@ let APP = {
   roles: [],
   nonRoomMaintenanceHistory: [],
   channels: [],
+  syncStatus: null,
+  emailStatus: null,
   activeTab: 'dashboard',
   reportRange: { start:'', end:'' },
   cleaningReportRange: { start:'', end:'' },
@@ -28,6 +30,14 @@ const APARTMENT_FIXED_RATE_CLIENT = 300000;
 function getLocalApi(){
   if (!window.api) throw new Error('Local desktop API is not available.');
   return window.api;
+}
+
+function confirmInternetAction(label){
+  if (!navigator.onLine) {
+    toast(`${label} requires an internet connection.`, 'error');
+    return false;
+  }
+  return window.confirm(`${label} requires internet access. Continue?`);
 }
 
 function applyBootstrapData(res){
@@ -736,6 +746,8 @@ function normalizeWhatsappNumber(phone){
 }
 
 function sendPaymentReminderWhatsapp(resId){
+  if (!confirmInternetAction('WhatsApp reminder')) return;
+
   const row =
     (APP.reservations || []).find(r => r.resId === resId) ||
     (APP.bookingHistory || []).find(r => r.resId === resId);
@@ -1475,6 +1487,7 @@ async function openCheckoutReceiptOptions(resId){
 }
 
 async function downloadCheckoutReceiptPdf(btn, resId){
+  if (!confirmInternetAction('PDF generation')) return;
   await runApiAction(btn, 'buildCheckoutReceiptPdf', [{ resId: resId }], function(res){
       downloadBase64File(res.fileName || 'checkout-receipt.pdf', res.mimeType || 'application/pdf', res.base64 || '');
       toast(res.message || 'Receipt ready.', 'success');
@@ -1484,7 +1497,7 @@ async function downloadCheckoutReceiptPdf(btn, resId){
 function sendCheckoutReceiptEmail(btn, resId){
   checkMailAuthorizationUI(function(auth){
     if (!auth || !auth.ok) {
-      toast('Email is not authorized yet. Admin should run authorizeMail() in Apps Script first.', 'error');
+      toast((auth && auth.message) || 'Email is not configured in Admin.', 'error');
       return;
     }
 
@@ -1492,7 +1505,7 @@ function sendCheckoutReceiptEmail(btn, resId){
     setBusy(btn, true);
 
     runApiAction(btn, 'emailCheckoutReceipt', [{ resId: resId, email: email }], function(res){
-        toast(res.message || 'Receipt sent successfully.', 'success');
+        toast(res.message || 'Receipt queued for delivery.', 'success');
     }, 'Could not send receipt email');
   });
 }
@@ -1804,6 +1817,7 @@ function downloadFinancialReportCsv(btn) {
 }
 
 function printBookingReceipt(resId) {
+  if (!confirmInternetAction('Receipt PDF / printing')) return;
   const booking = APP.bookingHistory.find(function(r) { return r.resId === resId; });
   if (!booking) return toast('Booking record not found.', 'error');
 
@@ -2034,8 +2048,171 @@ function renderAdmin(){
           </tbody>
         </table>
       </div>
+
+      ${canManageUsers ? `
+        <div class="section-title" style="margin-top:20px"><strong>Google Sheets Sync</strong></div>
+        <div class="form-grid" style="margin-bottom:14px">
+          <div>
+            <label>Enable Sync</label>
+            <select id="syncEnabled">
+              <option value="false">Disabled</option>
+              <option value="true">Enabled</option>
+            </select>
+          </div>
+          <div><label>Spreadsheet ID</label><input id="syncSpreadsheetId" placeholder="Google Sheet ID"></div>
+          <div class="full"><label>Service Account Key File</label><input id="syncKeyFile" placeholder="C:\\path\\to\\service-account.json"></div>
+          <div class="full btn-row">
+            <button class="btn btn-primary" onclick="saveSyncSettings(this)">Save Sync Settings</button>
+            <button class="btn btn-outline" onclick="queueFullSync(this)">Queue Full Sync</button>
+            <button class="btn btn-dark" onclick="runSyncNow(this)">Run Sync Now</button>
+          </div>
+        </div>
+        <div id="syncStatusBox" class="panel" style="margin:0"></div>
+
+        <div class="section-title" style="margin-top:20px"><strong>Email Delivery Queue</strong></div>
+        <div class="form-grid" style="margin-bottom:14px">
+          <div><label>Enable Email Delivery</label><select id="emailEnabled"><option value="false">Disabled</option><option value="true">Enabled</option></select></div>
+          <div><label>SMTP Host</label><input id="smtpHost" placeholder="smtp.gmail.com"></div>
+          <div><label>SMTP Port</label><input id="smtpPort" type="number" value="587"></div>
+          <div><label>Secure Connection</label><select id="smtpSecure"><option value="false">STARTTLS / Port 587</option><option value="true">SSL / Port 465</option></select></div>
+          <div><label>SMTP Username</label><input id="smtpUsername" placeholder="email@example.com"></div>
+          <div><label>SMTP Password / App Password</label><input id="smtpPassword" type="password"></div>
+          <div><label>From Name</label><input id="emailFromName" value="NDDC Clubhouse"></div>
+          <div><label>From Address</label><input id="emailFromAddress" placeholder="email@example.com"></div>
+          <div class="full btn-row">
+            <button class="btn btn-primary" onclick="saveEmailSettings(this)">Save Email Settings</button>
+            <button class="btn btn-dark" onclick="runEmailQueueNow(this)">Send Queued Emails Now</button>
+          </div>
+        </div>
+        <div id="emailStatusBox" class="panel" style="margin:0"></div>
+      ` : ''}
     </div>
   `;
+
+  if (canManageUsers) {
+    refreshSyncStatus();
+    refreshEmailStatus();
+  }
+}
+
+async function refreshSyncStatus(){
+  const box = document.getElementById('syncStatusBox');
+  try {
+    const res = await getLocalApi().getSyncStatus();
+    APP.syncStatus = res;
+    if (document.getElementById('syncEnabled')) document.getElementById('syncEnabled').value = String(!!res.enabled);
+    if (document.getElementById('syncSpreadsheetId')) document.getElementById('syncSpreadsheetId').value = res.spreadsheetId || '';
+    renderSyncStatusBox();
+  } catch (err) {
+    if (box) box.innerHTML = `<div class="toast error">Sync status unavailable</div>`;
+  }
+}
+
+function renderSyncStatusBox(){
+  const box = document.getElementById('syncStatusBox');
+  const s = APP.syncStatus || {};
+  if (!box) return;
+  box.innerHTML = `
+    <div class="stats" style="margin:0 0 12px">
+      ${statCard('Sync', s.enabled ? 'Enabled' : 'Disabled')}
+      ${statCard('Configured', s.configured ? 'Yes' : 'No')}
+      ${statCard('Pending', s.pending || 0)}
+      ${statCard('Last Status', s.lastStatus || '-')}
+    </div>
+    <div class="subtle">Last sync: ${escapeHtml(s.lastSyncAt || '-')}</div>
+    <div class="subtle">Config file: ${escapeHtml(s.configPath || '-')}</div>
+    ${s.lastError ? `<div class="toast error" style="margin-top:10px">${escapeHtml(s.lastError)}</div>` : ''}
+  `;
+}
+
+async function saveSyncSettings(btn){
+  const payload = {
+    enabled: document.getElementById('syncEnabled')?.value === 'true',
+    spreadsheetId: (document.getElementById('syncSpreadsheetId')?.value || '').trim(),
+    serviceAccountKeyFile: (document.getElementById('syncKeyFile')?.value || '').trim()
+  };
+  await runApiAction(btn, 'saveSyncConfig', [payload], function(res){
+    APP.syncStatus = res;
+    renderSyncStatusBox();
+    toast('Sync settings saved.', 'success');
+  }, 'Could not save sync settings');
+}
+
+async function queueFullSync(btn){
+  await runApiAction(btn, 'enqueueFullSync', [], function(res){
+    APP.syncStatus = res;
+    renderSyncStatusBox();
+    toast('Full sync queued.', 'success');
+  }, 'Could not queue sync');
+}
+
+async function runSyncNow(btn){
+  await runApiAction(btn, 'runSyncNow', [], function(res){
+    APP.syncStatus = res;
+    renderSyncStatusBox();
+    toast(res.lastStatus || 'Sync attempted.', res.lastError ? 'error' : 'success');
+  }, 'Sync failed');
+}
+
+async function refreshEmailStatus(){
+  const box = document.getElementById('emailStatusBox');
+  try {
+    const res = await getLocalApi().getEmailStatus();
+    APP.emailStatus = res;
+    if (document.getElementById('emailEnabled')) document.getElementById('emailEnabled').value = String(!!res.enabled);
+    if (document.getElementById('smtpHost')) document.getElementById('smtpHost').value = res.host || '';
+    if (document.getElementById('smtpPort')) document.getElementById('smtpPort').value = res.port || 587;
+    if (document.getElementById('smtpSecure')) document.getElementById('smtpSecure').value = String(!!res.secure);
+    if (document.getElementById('smtpUsername')) document.getElementById('smtpUsername').value = res.username || '';
+    if (document.getElementById('emailFromName')) document.getElementById('emailFromName').value = res.fromName || 'NDDC Clubhouse';
+    if (document.getElementById('emailFromAddress')) document.getElementById('emailFromAddress').value = res.fromAddress || '';
+    renderEmailStatusBox();
+  } catch (err) {
+    if (box) box.innerHTML = `<div class="toast error">Email status unavailable</div>`;
+  }
+}
+
+function renderEmailStatusBox(){
+  const box = document.getElementById('emailStatusBox');
+  const s = APP.emailStatus || {};
+  if (!box) return;
+  box.innerHTML = `
+    <div class="stats" style="margin:0 0 12px">
+      ${statCard('Email', s.enabled ? 'Enabled' : 'Disabled')}
+      ${statCard('Configured', s.configured ? 'Yes' : 'No')}
+      ${statCard('Queued', s.pending || 0)}
+      ${statCard('Last Status', s.lastStatus || '-')}
+    </div>
+    <div class="subtle">Last sent: ${escapeHtml(s.lastSentAt || '-')}</div>
+    <div class="subtle">Config file: ${escapeHtml(s.configPath || '-')}</div>
+    ${s.lastError ? `<div class="toast error" style="margin-top:10px">${escapeHtml(s.lastError)}</div>` : ''}
+  `;
+}
+
+async function saveEmailSettings(btn){
+  const payload = {
+    enabled: document.getElementById('emailEnabled')?.value === 'true',
+    host: (document.getElementById('smtpHost')?.value || '').trim(),
+    port: Number(document.getElementById('smtpPort')?.value || 587),
+    secure: document.getElementById('smtpSecure')?.value === 'true',
+    username: (document.getElementById('smtpUsername')?.value || '').trim(),
+    password: document.getElementById('smtpPassword')?.value || '',
+    fromName: (document.getElementById('emailFromName')?.value || '').trim(),
+    fromAddress: (document.getElementById('emailFromAddress')?.value || '').trim()
+  };
+  await runApiAction(btn, 'saveEmailConfig', [payload], function(res){
+    APP.emailStatus = res;
+    renderEmailStatusBox();
+    toast('Email settings saved.', 'success');
+  }, 'Could not save email settings');
+}
+
+async function runEmailQueueNow(btn){
+  await runApiAction(btn, 'runEmailQueueNow', [], function(res){
+    APP.emailStatus = res;
+    renderEmailStatusBox();
+    toast(res.lastStatus || 'Email queue processed.', res.lastError ? 'error' : 'success');
+  }, 'Could not process email queue');
 }
 
 function updateReportRange(){
@@ -2336,14 +2513,17 @@ function openPrintWindow(html){
 }
 
 function printBookingPaymentReport(){
+  if (!confirmInternetAction('Report printing')) return;
   openPrintWindow(buildBookingPaymentReportHtml());
 }
 
 function printCleaningReport(){
+  if (!confirmInternetAction('Report printing')) return;
   openPrintWindow(buildCleaningReportHtml());
 }
 
 async function downloadBookingPaymentReportPdfAction(btn){
+  if (!confirmInternetAction('PDF generation')) return;
   const payload = { startDate: APP.reportRange.start || '', endDate: APP.reportRange.end || '' };
   await runApiAction(btn, 'downloadBookingPaymentReportPdf', [payload], function(res){
       downloadBase64File(res.fileName || 'booking-payment-report.pdf', res.mimeType || 'application/pdf', res.base64 || '');
@@ -2352,6 +2532,7 @@ async function downloadBookingPaymentReportPdfAction(btn){
 }
 
 async function downloadCleaningReportPdfAction(btn){
+  if (!confirmInternetAction('PDF generation')) return;
   const payload = {
     startDate: APP.cleaningReportRange.start || '',
     endDate: APP.cleaningReportRange.end || '',
@@ -2562,6 +2743,7 @@ async function logoutApp(){
   } catch (err) {
     toast((err && err.message) || 'Logout failed', 'error');
   }
+  if (!confirmInternetAction('PDF generation')) return;
 }
 
 function showModal(title, body){

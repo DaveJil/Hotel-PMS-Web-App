@@ -2,6 +2,8 @@ const { app, BrowserWindow } = require('electron');
 const path = require('path');
 const { initDatabase } = require('./database');
 const { registerIpcHandlers } = require('./ipc');
+const { startBackgroundSync } = require('./sync');
+const { startEmailWorker } = require('./email');
 
 function createWindow() {
   const win = new BrowserWindow({
@@ -23,6 +25,8 @@ function createWindow() {
 app.whenReady().then(() => {
   initDatabase();
   registerIpcHandlers();
+  startBackgroundSync();
+  startEmailWorker();
   createWindow();
 
   app.on('activate', () => {

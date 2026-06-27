@@ -208,6 +208,60 @@ CREATE TABLE IF NOT EXISTS AuditLog (
   details TEXT NOT NULL DEFAULT ''
 );
 
+CREATE TABLE IF NOT EXISTS SyncQueue (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  table_name TEXT NOT NULL,
+  operation TEXT NOT NULL DEFAULT 'snapshot',
+  payload TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'pending',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_sync_queue_status
+  ON SyncQueue(status, created_at);
+
+CREATE TABLE IF NOT EXISTS SyncState (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL DEFAULT ''
+);
+
+INSERT OR IGNORE INTO SyncState (key, value) VALUES
+  ('enabled', 'false'),
+  ('lastStatus', 'Not configured'),
+  ('lastSyncAt', ''),
+  ('lastError', ''),
+  ('spreadsheetId', '');
+
+CREATE TABLE IF NOT EXISTS EmailQueue (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  recipient TEXT NOT NULL,
+  subject TEXT NOT NULL,
+  html_body TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  sent_at TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_email_queue_status
+  ON EmailQueue(status, created_at);
+
+CREATE TABLE IF NOT EXISTS EmailState (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL DEFAULT ''
+);
+
+INSERT OR IGNORE INTO EmailState (key, value) VALUES
+  ('enabled', 'false'),
+  ('lastStatus', 'Not configured'),
+  ('lastSentAt', ''),
+  ('lastError', '');
+
 INSERT OR IGNORE INTO Setup (setting, value) VALUES
   ('Hotel Name', 'NDDC Clubhouse'),
   ('Tagline', 'Redefining Luxury Living'),

@@ -1,32 +1,76 @@
-# Hotel-PMS-Web-App
-Google Sheets and Google Apps Script were used to create a lightweight hotel property management system (PMS). Without the need for pricey software, this system assists hotels, guest houses, and serviced apartments in managing rooms, reservations, housekeeping, and payments.
+# NDDC Clubhouse PMS
 
-The PMS is simple to deploy, maintain, and access from any location because it uses Google Sheets as the database and Apps Script as the backend.
+Offline-first hotel property management desktop application built with Electron, Node.js, and SQLite.
 
-Features
+## Desktop Features
 
-- Room administration and availability monitoring
-- Management of reservations and bookings
-- Check-in and check-out procedures for guests
-- Status monitoring for cleaning and housekeeping
-- Records of payments and invoices
-- Reports and reservation history
-- Google Sheets operational dashboard
-- 
-The Tech Stack
-- Google Sheets: Managing and storing data
-- Google Apps Script: Automation and backend logic
-- Web App UI: Staff front-end interface
+- Local SQLite database
+- Login and role-based access
+- Rooms and reservations
+- Check-in, check-out, extend stay, and late checkout
+- Payments and payment history
+- Room and non-room housekeeping
+- Maintenance
+- Reports and receipts
+- User administration
+- Optional Google Sheets background sync
+- Offline email queue with automatic SMTP delivery
 
-Advantages
-- No server is needed.
-- Low-cost implementation
-- Cloud-based access
-- Simple personalization for tiny hotels
+## Offline Behavior
 
-Use Cases
+Hotel operations are written to SQLite first and continue without internet.
 
-- Tiny lodges and hotels
-- Guest residences
-- Managers of Airbnb
-- Apartments with services
+- Google Sheets changes are placed in `SyncQueue`.
+- Emails are placed in `EmailQueue`.
+- Background workers retry queued work every 60 seconds.
+- WhatsApp and PDF actions display an internet-required confirmation.
+- PDF generation is blocked when the computer is offline.
+
+## Run on macOS
+
+```bash
+npm install
+npx electron-builder install-app-deps
+npm start
+```
+
+## Build Windows Installer on macOS
+
+```bash
+npm install
+npm run build:win
+```
+
+The Windows x64 installer is generated in `dist/`.
+
+## Google Sheets Sync
+
+1. Create a Google Cloud service account.
+2. Enable the Google Sheets API.
+3. Share the PMS spreadsheet with the service account email.
+4. Log in as Admin.
+5. Open **Admin > Google Sheets Sync**.
+6. Enter the spreadsheet ID and service-account JSON file path.
+7. Enable sync, save, queue a full sync, and run sync.
+
+SQLite is authoritative. Queued table snapshots replace the matching Google Sheet tab contents.
+
+## Email Queue
+
+Email delivery uses SMTP and does not interrupt offline work.
+
+1. Log in as Admin.
+2. Open **Admin > Email Delivery Queue**.
+3. Enter the SMTP host, port, username, password/app password, and sender address.
+4. Enable email delivery and save.
+
+Reservation confirmations, reservation updates, and checkout receipts are queued locally. They send automatically when internet is available.
+
+For Gmail, use `smtp.gmail.com`, port `587`, STARTTLS, and a Google app password.
+
+## Default Login
+
+```text
+Username: admin
+Password: 1234
+```
