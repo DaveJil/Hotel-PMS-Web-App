@@ -269,6 +269,48 @@ function normalizeHeader(value) {
   return String(value == null ? '' : value).trim().toLowerCase();
 }
 
+const REKEY_DUPLICATE_TABLES = new Set([
+  'PaymentHistory',
+  'HousekeepingHistory',
+  'CleaningHistory',
+  'MaintenanceHistory',
+  'NonRoomHousekeepingHistory',
+  'NonRoomCleaningHistory',
+  'NonRoomMaintenanceHistory',
+  'BackdatedEntryLog'
+]);
+
+function repairDuplicatePrimaryKeys(tableName, records) {
+  const keyColumn = TABLES[tableName].columns[0];
+  const used = new Set();
+  let repaired = 0;
+
+  records.forEach((record) => {
+    const original = String(record[keyColumn] == null ? '' : record[keyColumn]).trim();
+    if (!original) throw new Error(`${TABLES[tableName].sheet} contains a row without ${TABLES[tableName].headers[0]}.`);
+    if (!used.has(original)) {
+      used.add(original);
+      record[keyColumn] = original;
+      return;
+    }
+    if (!REKEY_DUPLICATE_TABLES.has(tableName)) {
+      throw new Error(`${TABLES[tableName].sheet} contains duplicate ${TABLES[tableName].headers[0]} ${original}.`);
+    }
+
+    let copyNumber = 2;
+    let replacement = `${original}-DUP${copyNumber}`;
+    while (used.has(replacement)) {
+      copyNumber += 1;
+      replacement = `${original}-DUP${copyNumber}`;
+    }
+    record[keyColumn] = replacement;
+    used.add(replacement);
+    repaired += 1;
+  });
+
+  return repaired;
+}
+
 function validateIncomingReservations(records) {
   const active = records.filter((row) => ['reserved', 'checked in'].includes(String(row.status || '').toLowerCase()));
   const rooms = getDb().prepare('SELECT room_no, apartment_group FROM Rooms').all();
@@ -276,10 +318,7 @@ function validateIncomingReservations(records) {
   function physicalRooms(unitNo) {
     const group = rooms.filter((room) => String(room.apartment_group || '') === String(unitNo));
     if (group.length) return group.map((room) => String(room.room_no));
-    const room = rooms.find((item) => String(item.room_no) === String(unitNo));
-    return room && room.apartment_group
-      ? [String(room.room_no), `group:${room.apartment_group}`]
-      : [String(unitNo)];
+    return [String(unitNo)];
   }
 
   function dateOnly(value) {
@@ -293,9 +332,7 @@ function validateIncomingReservations(records) {
       const second = active[j];
       const firstUnits = physicalRooms(first.room_no);
       const secondUnits = physicalRooms(second.room_no);
-      const sameUnit = firstUnits.some((unit) => secondUnits.includes(unit))
-        || firstUnits.includes(`group:${second.room_no}`)
-        || secondUnits.includes(`group:${first.room_no}`);
+      const sameUnit = firstUnits.some((unit) => secondUnits.includes(unit));
       if (!sameUnit) continue;
 
       const firstStart = dateOnly(first.check_in);
@@ -345,6 +382,7 @@ async function pullTableSnapshot(sheets, spreadsheetId, tableName) {
         : row[headerIndexes.get(normalizeHeader(def.headers[index]))]
     ])));
 
+  const repaired = repairDuplicatePrimaryKeys(tableName, records);
   if (tableName === 'Reservations') validateIncomingReservations(records);
 
   const placeholders = def.columns.map(() => '?').join(', ');
@@ -355,7 +393,7 @@ async function pullTableSnapshot(sheets, spreadsheetId, tableName) {
     getDb().prepare(`DELETE FROM ${tableName}`).run();
     records.forEach((record) => insert.run(def.columns.map((column) => record[column])));
   })();
-  return { pulled: records.length };
+  return { pulled: records.length, repaired };
 }
 
 async function processSyncQueue(options = {}) {
@@ -395,17 +433,20 @@ async function processSyncQueue(options = {}) {
 
     let pulledTables = 0;
     let pulledRows = 0;
+    let repairedIds = 0;
     for (const tableName of Object.keys(TABLES)) {
       const result = await pullTableSnapshot(sheets, config.spreadsheetId, tableName);
       if (!result.skipped) {
         pulledTables += 1;
         pulledRows += result.pulled || 0;
+        repairedIds += result.repaired || 0;
+        if (result.repaired) enqueueTable(tableName);
       }
     }
 
     setState(
       'lastStatus',
-      `Online sync complete: pushed ${pending.length} table(s), pulled ${pulledRows} row(s) from ${pulledTables} table(s)`
+      `Online sync complete: pushed ${pending.length} table(s), pulled ${pulledRows} row(s) from ${pulledTables} table(s)${repairedIds ? `, repaired ${repairedIds} duplicate history ID(s)` : ''}`
     );
     setState('lastSyncAt', new Date().toISOString());
     setState('lastError', '');
@@ -438,6 +479,7 @@ module.exports = {
   enqueueTables,
   getSyncStatus,
   processSyncQueue,
+  repairDuplicatePrimaryKeys,
   saveConfig,
   startBackgroundSync,
   stopBackgroundSync
